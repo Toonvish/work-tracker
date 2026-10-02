@@ -1,0 +1,5 @@
+[
+  { "$type": "Project", "shortName": "SP", "archived": false },
+  { "$type": "Project", "shortName": "MS", "archived": false },
+  { "$type": "Project", "shortName": "OLD", "archived": true }
+]

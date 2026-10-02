@@ -1,0 +1,82 @@
+[
+  {
+    "id": 5001,
+    "project_id": 42,
+    "action_name": "approved",
+    "target_id": 9003,
+    "target_iid": 21,
+    "target_type": "MergeRequest",
+    "target_title": "Fix pagination off-by-one",
+    "created_at": "2026-09-29T11:00:00.000Z",
+    "author_id": 7,
+    "author_username": "eric",
+    "author": { "id": 7, "username": "eric", "name": "Eric Stampa", "state": "active" }
+  },
+  {
+    "id": 5002,
+    "project_id": 42,
+    "action_name": "commented on",
+    "target_id": 77001,
+    "target_iid": null,
+    "target_type": "DiffNote",
+    "target_title": null,
+    "created_at": "2026-09-29T12:30:00.000Z",
+    "author_id": 7,
+    "author_username": "eric",
+    "note": {
+      "id": 77001,
+      "type": "DiffNote",
+      "body": "Looks good, one nit.",
+      "attachment": null,
+      "system": false,
+      "noteable_id": 9004,
+      "noteable_type": "MergeRequest",
+      "noteable_iid": 22,
+      "resolvable": true,
+      "confidential": false,
+      "internal": false
+    }
+  },
+  {
+    "id": 5003,
+    "project_id": 42,
+    "action_name": "pushed to",
+    "target_id": null,
+    "target_iid": null,
+    "target_type": null,
+    "target_title": null,
+    "created_at": "2026-09-30T07:40:00.000Z",
+    "author_id": 7,
+    "author_username": "eric",
+    "push_data": {
+      "commit_count": 2,
+      "action": "pushed",
+      "ref_type": "branch",
+      "commit_from": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "commit_to": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "ref": "feature/SP-123-login",
+      "commit_title": "Add validation"
+    }
+  },
+  {
+    "id": 5004,
+    "project_id": 42,
+    "action_name": "commented on",
+    "target_id": 77002,
+    "target_iid": null,
+    "target_type": "Note",
+    "target_title": null,
+    "created_at": "2026-09-30T08:10:00.000Z",
+    "author_id": 7,
+    "author_username": "eric",
+    "note": {
+      "id": 77002,
+      "type": null,
+      "body": "Can you reproduce this?",
+      "system": false,
+      "noteable_id": 555,
+      "noteable_type": "Issue",
+      "noteable_iid": 31
+    }
+  }
+]

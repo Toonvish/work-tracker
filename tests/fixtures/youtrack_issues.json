@@ -1,0 +1,46 @@
+[
+  {
+    "$type": "Issue",
+    "id": "2-101",
+    "idReadable": "SP-101",
+    "summary": "Login page rejects valid passwords",
+    "created": 1790586000000,
+    "updated": 1790683200000,
+    "resolved": null,
+    "project": { "$type": "Project", "shortName": "SP" },
+    "customFields": [
+      {
+        "$type": "SingleEnumIssueCustomField",
+        "name": "Priority",
+        "value": { "$type": "EnumBundleElement", "name": "Major" }
+      },
+      {
+        "$type": "StateIssueCustomField",
+        "name": "State",
+        "value": { "$type": "StateBundleElement", "name": "In Progress" }
+      },
+      {
+        "$type": "SingleUserIssueCustomField",
+        "name": "Assignee",
+        "value": { "$type": "User", "login": "eric", "fullName": "Eric Stampa" }
+      }
+    ]
+  },
+  {
+    "$type": "Issue",
+    "id": "2-102",
+    "idReadable": "MS-45",
+    "summary": "Update the deployment checklist",
+    "created": 1790586000000,
+    "updated": 1790692200000,
+    "resolved": 1790692200000,
+    "project": { "$type": "Project", "shortName": "MS" },
+    "customFields": [
+      {
+        "$type": "StateIssueCustomField",
+        "name": "State",
+        "value": { "$type": "StateBundleElement", "name": "Done" }
+      }
+    ]
+  }
+]
