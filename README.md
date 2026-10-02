@@ -130,12 +130,15 @@ work-tracker --config ./my.toml
 ```
 
 Interactive list: Enter opens the selected item in the browser, arrow keys
-move, Esc or `q` quits. A group with exactly one MR opens that MR; a group with
-several MRs asks which one to open (or the issue itself). Linked items are
-shown as the issue line with its MR(s) beneath it. Each row shows a kind
-marker, the issue ID, the title, the MR `!iid` and project path, the current
-state, the last-updated time and your role (author, reviewer, approver,
-commenter, assignee, updater, ...).
+move, Esc or `q` quits. Each task is one row: an issue together with its
+MR(s), an issue without MR, or an MR without issue. All rows share the same
+columns, under a header line: issue ID, MR (`project!iid`, `+N` when the
+issue has more MRs), title, issue state, MR state, last-updated time and your
+roles (author, reviewer, approver, commenter, assignee, updater, ...). A `-`
+marks a missing issue or MR. Columns are coloured on a terminal that allows it
+(`NO_COLOR` turns it off). A row with exactly one MR opens that MR; a row with
+several MRs asks which one to open (or the issue itself). `--plain` prints the
+same columns followed by every URL of the row (issue first, then the MRs).
 
 Accepted date/time formats for `--since`, `--until` and `--now`:
 `2026-09-29T10:00`, `2026-09-29T10:00:30`, `"2026-09-29 10:00"`, `2026-09-29`

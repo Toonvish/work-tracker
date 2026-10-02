@@ -1242,34 +1242,40 @@ pub enum Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStyle { Opened, Draft, Merged, Closed, IssueOpen, IssueResolved }
 #[derive(Debug, Clone, PartialEq)]
+pub struct State { pub text: String, pub style: StateStyle }
+#[derive(Debug, Clone, PartialEq)]
 pub struct Row {
-    pub kind: &'static str,          // "ISSUE" | "LINK" | "MR" | "  └ MR"
-    pub reference: String, pub title: String, pub state: String, pub state_style: StateStyle,
+    pub issue: String,               // "SP-123"; "" for an MR without issue
+    pub mr: String,                  // "proj!456", "proj!456 +2"; "" for an issue without MR
+    pub title: String,
+    pub issue_state: Option<State>, pub mr_state: Option<State>,
     pub updated: String,             // already formatted (local time)
-    pub roles: String, pub url: String, pub target: Target,
+    pub roles: String, pub urls: Vec<String>, pub target: Target,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout { Interactive { width: usize }, Plain { title_width: usize } }
+pub enum Layout { Interactive { width: usize }, Plain { title_width: usize, roles_width: usize } }
 pub fn build_rows<Tz: TimeZone>(report: &Report, tz: &Tz, now_year: i32) -> Vec<Row>;
-pub fn plain_title_width(rows: &[Row]) -> usize;   // min(80, max measured title width), at least 5
+pub fn plain_layout(rows: &[Row]) -> Layout;
 pub fn format_row(row: &Row, layout: Layout, color: bool) -> String;
+pub fn format_header(layout: Layout, color: bool) -> String;
 ```
-`build_rows` emits rows in entry order. An `Entry::Issue` with MRs gives one
-`LINK` row followed by one `  └ MR` row per MR. An `Entry::Issue` without
-MRs gives an `ISSUE` row. An `OrphanMr` gives an `MR` row. Every text cell
-goes through `text::sanitize_line`, so no label contains a newline, tab or
-ESC.
+`build_rows` emits **one row per entry**, in entry order, so every row has
+the same columns. An `Entry::Issue` row carries the issue and its MRs; an
+`OrphanMr` row leaves the issue cells empty. Every text cell goes through
+`text::sanitize_line`, so no label contains a newline, tab or ESC.
 
-Columns, separated by 2 spaces:
+Columns, separated by 2 spaces, with a header line (`ISSUE  MR  TITLE  ISSUE
+STATE  MR STATE  UPDATED  ROLES`, plus `URL` in plain) above the rows:
 
 | col | width | content |
 |---|---|---|
-| kind | 6 | `ISSUE` (issue, no MR), `LINK` (issue with MRs), `MR` (orphan MR), `  └ MR` (child row) |
-| ref | 24 | issue: `SP-123`. MR: `!456 group/proj`. When it is longer than 24, truncate the project path from the **left** with a leading `…`, keeping `!iid ` and as much of the path's tail as fits (e.g. `!456 …oup/sub/project`). |
-| title | flex | issue summary / MR title. An orphan MR with refs gets ` → SP-9, SP-10` appended. |
-| state | 12 | MR: `opened`/`draft`/`merged`/`closed`/`locked`. Issue: YouTrack state. |
-| updated | 11 | local `%m-%d %H:%M`; for another year, `%Y-%m-%d` |
-| roles | 18 (interactive) / unbounded (plain) | roles joined with `,` (e.g. `author,commenter`). `Referenced` shows as `ref`. |
+| issue | 9 | `SP-123`; `-` for an MR without issue |
+| mr | 16 | first MR (most recently updated) as `<last path segment>!<iid>`, plus ` +N` for N more MRs; `-` for an issue without MR. When too long, the project name is cut from the **left** with a leading `…`, keeping `!iid +N`. |
+| title | flex | issue summary; for an orphan MR its title, with ` → SP-9, SP-10` for refs |
+| issue state | 12 | YouTrack state; `-` for an orphan MR |
+| mr state | 8 | state of the MR in the mr column: `opened`/`draft`/`merged`/`closed`/`locked`; `-` without MR |
+| updated | 11 | latest of the issue and its MRs; local `%m-%d %H:%M`, for another year `%Y-%m-%d` |
+| roles | 18 (interactive) / widest, at least 18 (plain) | union of issue and MR roles joined with `,`. `Referenced` shows as `ref`, and only when it is the sole role. |
 
 Every column except the last is padded with `console::pad_str` and truncated
 with `console::truncate_str(s, w, "…")`. Both are Unicode-width aware.
@@ -1278,22 +1284,23 @@ Widths:
 - **Interactive:** `Layout::Interactive { width }` with
   `width = term_cols − 3`. dialoguer 0.12's `ColorfulTheme` renders each item
   as `"{prefix} {text}"`, which adds 2 columns, plus 1 safety column. The
-  fixed columns take 6+24+12+11+18 = 71, plus 5 separators × 2 = 81.
-  `title_width = max(20, width − 81)`. As a last step, truncate the whole
+  fixed columns take 9+16+12+8+11+18 = 74, plus 6 separators × 2 = 86.
+  `title_width = max(20, width − 86)`. As a last step, truncate the whole
   label to `width` with `console::truncate_str(label, width, "…")`, so
   `console::measure_text_width(label) <= width` **always** holds (tested at
-  widths 60, 101 and 160). Do not pad trailing spaces after the roles column.
-- **Plain:** `Layout::Plain { title_width }` with
-  `title_width = plain_title_width(&rows)`. Roles are not truncated. The last
-  column is the URL (MR `web_url` / issue `web_url`), so links are clickable
-  in a terminal. There are no trailing spaces.
+  widths 60, 101 and 160, with and without colour). Do not pad trailing
+  spaces after the roles column.
+- **Plain:** `plain_layout(&rows)`: `title_width` = min(80, widest title),
+  at least 5; `roles_width` = widest roles, at least 18, so the links line
+  up. Roles are not truncated. The last column lists the URLs (issue first,
+  then every MR), so links are clickable in a terminal. There are no
+  trailing spaces.
 
-Color: `color = true` only for **plain** output on a TTY
-(`console::colors_enabled()` respects `NO_COLOR`). **Interactive labels are
-always built with `color = false`.** ColorfulTheme applies its own
-active-item style, and ANSI resets inside a label would cancel that highlight
-partway through the row. Plain styles: state merged = magenta, opened = green,
-draft = yellow, closed/locked = red, issue resolved = dim, kind column bold.
+Colour (`color = true` on a TTY that allows it, `console::colors_enabled()` /
+`colors_enabled_stderr()` respect `NO_COLOR`): issue id cyan bold, MR ref
+bright blue, updated and roles dim, `-` placeholders dim, header bold. States:
+merged = magenta, opened = green, draft = yellow, closed/locked = red, issue
+resolved = dim. The visible text is identical with and without colour.
 
 ### 8.4 Interactive loop (`ui/interactive.rs`)
 
@@ -1301,16 +1308,17 @@ draft = yellow, closed/locked = red, issue resolved = dim, kind column bold.
 (term_rows, term_cols) = console::Term::stdout().size()
 width  = term_cols.saturating_sub(3).max(40)
 rows   = build_rows(report, &Local, now_year)
-labels = rows.map(|r| format_row(r, Layout::Interactive { width }, false))
-// The header and warnings are printed BEFORE the Select, outside dialoguer's redraw region.
-used   = 2 (header lines) + number of warning lines
+plain, colored = rows.map(|r| format_row(r, Layout::Interactive { width }, false / colors_enabled_stderr()))
+// The window line, counts, warnings and the help line are printed BEFORE the Select,
+// outside dialoguer's redraw region. The column header is the Select prompt.
+used   = 3 (window, counts, help) + number of warning lines
 max_length = term_rows.saturating_sub(used + 1).max(3)    // 1 safety line. dialoguer 0.12 itself reserves 2 rows
 // for the prompt and page indicator: visible items = clamp(max_length, 3, term_rows) - 2 (dialoguer src/paging.rs)
 cursor = 0
 loop:
-    sel = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Enter: open in browser · ↑/↓ move · Esc/q: quit")
-            .items(&labels).default(cursor).max_length(max_length)
+    sel = Select::with_theme(&ListTheme { plain, colored, header: true, .. })
+            .with_prompt(format_header(..))      // cut by 16 cols when paged, for " [Page n/m] "
+            .items(&["0", "1", ...]).default(cursor).max_length(max_length)
             .report(false)
             .interact_opt()?                     // Some(i) on Enter, None on Esc/q
     match sel:
@@ -1321,17 +1329,24 @@ loop:
              items = mrs labels (truncated to width) + ["Open issue in YouTrack"]
              sub = Select…interact_opt()?; Some(j) -> open selected; None -> back to main list
 ```
-Target rules (`build_rows` sets them; they are unit-tested):
-- A `LINK` row with exactly 1 MR opens that MR's URL (SPEC).
-- A `LINK` row with ≥2 MRs offers the choice (`ChooseMr`), including
-  "Open issue in YouTrack".
-- An `ISSUE` row (0 MRs) opens the issue.
-- A child `  └ MR` row or an orphan `MR` row opens that MR.
+`ListTheme` wraps `ColorfulTheme`. dialoguer only sees index keys and the
+theme renders `colored[i]` (inactive) or `plain[i]` (active, so the cyan
+highlight covers the whole row). Reason: dialoguer 0.12 sizes items by their
+**byte** length when redrawing (`prompts/select.rs`), so ANSI codes or
+non-ASCII text in a full-width label made it clear lines above the list. The
+prompt is written as `"  {header}"`, aligned with the item prefix. The MR
+sub-menu uses the same theme with the normal `? <help> ›` prompt.
 
-**Decision (known limitation, in README):** in a group with exactly one MR,
+Target rules (`build_rows` sets them; they are unit-tested):
+- An issue row with exactly 1 MR opens that MR's URL (SPEC).
+- An issue row with ≥2 MRs offers the choice (`ChooseMr`), including
+  "Open issue in YouTrack".
+- An issue row without MR opens the issue.
+- An orphan MR row opens that MR.
+
+**Decision (known limitation, in README):** for an issue with exactly one MR,
 the YouTrack issue cannot be opened from the interactive list. SPEC fixes
-that the group row opens the MR, and the only child row is that same MR. An
-extra row per group would double the list length for the most common case.
+that the row opens the MR.
 The issue URL is available through `--plain` (URL column) and `--json`
 (`web_url`).
 
@@ -1486,7 +1501,7 @@ and `cargo fmt --check`.
 | `youtrack::collect` (FakeYouTrack) | `project_clause` for 0/1/2 projects. Exact assigned query string: `assignee: me updated: 2026-09-27 .. 2026-10-02` and `(project: SP or project: MS) assignee: me updated: 2026-09-27 .. 2026-10-02`. Client-side `updated` filter. Activities → IDs from `target.idReadable` and `target.issue.idReadable`. Comment categories → Commenter, others → Updater. Fallback chain: FULL 400 then CORE OK → activities used, one warning, the fake recorded two activity calls; FULL 400 then CORE 400 → query fallback with exact query `(updater: me or commenter: me) updated: …`, two warnings; FULL 404 → query fallback directly; FULL 401 → `Err`. State extraction: object, array, string, null+resolved, null+unresolved, custom `state_field`. `fetch_by_ids`: exact batch query `issue id: SP-1 or issue id: SP-2`; chunking at 20 (45 IDs → 3 batch calls); an unrelated extra result in a batch is discarded; an ID missing from a successful batch is fetched with `issue_by_id`; batch 400 → every ID fetched individually; per-ID 404 → `missing`, no warning; alias (`issue_by_id("OLD-12")` returns `NEW-5`) → `aliases[OLD-12] = NEW-5` and NEW-5 kept; more than 50 per-ID fetches → warning; batch 401 → `Err`. `fetch_referenced` caps at 50 with a warning. A `project_short_names` failure → `admin_projects == None` plus a warning |
 | client URL builders | pure fns in `gitlab/client.rs` and `youtrack/client.rs` that return `reqwest::Url` for each request. Test query parameters (`scope=all`, `iids[]` repeated, events `after`/`before`, `$top`/`$skip = i*T`, `fields`, `categories`, `author=me`, ms timestamps, `issueQuery`) by parsing `url.query_pairs()` |
 | DTO deserialization | `tests/fixtures/*.json` (hand-written from the API docs), loaded with `include_str!`: GitLab MR list, events (MR approved, note on MR, push, issue note), user. YouTrack issues (with `$type` noise and the State field as an object), activities (comment and custom-field targets). Each deserializes and converts correctly |
-| `ui::rows` | kind markers per entry type. Target rules (1 MR → `Url(mr)`, ≥2 → `ChooseMr`, 0 → `Url(issue)`, child → `Url(mr)`). Ref-column left truncation keeps `!iid`. `format_row(Interactive{width: 120}, color=false)` matches an expected literal string. `measure_text_width(label) <= width` at widths 60, 101 and 160. Interactive labels contain no `\x1b`. A title containing `\n` is sanitized. A plain row has the URL as its last column and no trailing spaces. Updated-date format for the current and another year |
+| `ui::rows` | one row per entry with issue/MR refs. Target rules (1 MR → `Url(mr)`, ≥2 → `ChooseMr`, 0 → `Url(issue)`, orphan → `Url(mr)`). MR-column left truncation keeps `!iid +N`. `format_row(Interactive{width: 120}, color=false)` matches an expected literal string; the header aligns with the rows. `measure_text_width(label) <= width` at widths 60, 101 and 160, with and without colour. Stripping colour gives the uncoloured row. A title containing `\n` is sanitized. A plain row ends with all its URLs and no trailing spaces. Updated-date format for the current and another year |
 | `ui` (mod) | `format_counts` singular/plural; mode selection as a pure fn `select_mode(json, plain, stdout_tty, stderr_tty, stdin_tty) -> OutputMode` |
 | `ui::json` | the serialized output has the documented keys; roles lowercase; IssueId serialized as `"SP-123"`; origin `meeting` / `previous` / `explicit` |
 | `app` (unit tests in `src/app.rs`, using the fakes) | `build_report` with a fake GitLab and a fake YouTrack yields a linked group, an orphan, and a referenced issue fetched by ID. Alias: MR title `OLD-12 fix`, with the YouTrack fake resolving OLD-12 to NEW-5 → the MR sits under the NEW-5 group and there is no OLD-12 row. GitLab fake returns Unauthorized → YouTrack results present, `failed_sources == ["GitLab"]`. Both fail → `failed_sources.len() == enabled_sources == 2`. YouTrack `None` with `YtSettings.projects = ["SP"]` → an MR titled `SP-1 UTF-8 FIX-2` has `issue_ids == [SP-1]` |
@@ -1540,6 +1555,13 @@ Sections:
 ---
 
 ## 12. Revision log
+
+Revision 3 (list view):
+- 8.3 / 8.4: one row per task instead of an issue line with MR child rows.
+  Issue and MR references get their own columns (`-` when absent), MR state
+  has its own column, roles are the union, plain lists every URL and has a
+  column header. Interactive labels are now coloured per column; the
+  `ListTheme` index-key workaround keeps dialoguer's redraw correct.
 
 Revision 2 (review findings resolved):
 - 5.2 / 6.2: event and query date padding is now ±2 days through

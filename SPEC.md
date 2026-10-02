@@ -102,11 +102,13 @@ Issues with no MR and MRs with no issue are still shown.
 
 - Default: interactive terminal list (e.g. `inquire`/`dialoguer`-style
   select, or a small ratatui list if needed). Each row shows:
-  - kind marker (MR / Issue / linked pair), issue ID, title,
-    MR `!iid` and project path, **current state** (MR: opened/draft/merged/
+  - issue ID, title,
+    MR `project!iid`, **current state** (MR: opened/draft/merged/
     closed; Issue: YouTrack `State` field), last-updated time, my role
     (author / reviewer / commenter).
-  - Linked pairs render as one group: issue line with its MR(s) beneath.
+  - One row per task (issue with its MR(s), issue without MR, or MR
+    without issue), all rows with the same columns; colour per column.
+    (Changed 2026-10-02; was: issue line with its MR(s) beneath.)
 - Enter opens the selected item's web URL in the browser (`xdg-open` /
   `open` crate). Opening an issue group opens the MR if there is exactly one,
   otherwise offers the choice. `q`/Esc quits.
