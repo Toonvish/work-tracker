@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use super::{
-    ActivityQuery, YouTrackApi, YtActivity, YtCategory, YtCustomField, YtIssue, YtIssueRef,
-    YtTarget,
+    ActivityQuery, YouTrackApi, YtActivity, YtCategory, YtCustomField, YtField, YtIssue,
+    YtIssueRef, YtTarget,
 };
 use crate::error::ApiError;
 use crate::http::{FakeErr, Listing, YOUTRACK};
@@ -18,6 +18,8 @@ pub struct FakeYouTrack {
     pub by_id: HashMap<String, Result<Option<YtIssue>, FakeErr>>,
     /// Matched by `categories.len()` (FULL = 15, CORE = 5). No match returns `Ok(empty)`.
     pub activities: Vec<(usize, Result<Vec<YtActivity>, FakeErr>)>,
+    /// Returned by `issue_activities` whatever the query.
+    pub issue_activities: Result<Vec<YtActivity>, FakeErr>,
     /// Marks every returned `Listing` as truncated.
     pub truncate: bool,
     pub calls: Mutex<Vec<String>>,
@@ -31,6 +33,7 @@ impl FakeYouTrack {
             searches: HashMap::new(),
             by_id: HashMap::new(),
             activities: Vec::new(),
+            issue_activities: Ok(Vec::new()),
             truncate: false,
             calls: Mutex::new(Vec::new()),
         }
@@ -133,6 +136,21 @@ impl YouTrackApi for FakeYouTrack {
             Some((_, Err(e))) => Err(err(e, "activities")),
         }
     }
+
+    fn issue_activities(&self, q: &ActivityQuery) -> Result<Listing<YtActivity>, ApiError> {
+        self.record(format!(
+            "issue_activities {} {}",
+            q.categories.len(),
+            q.issue_query.as_deref().unwrap_or("-")
+        ));
+        match &self.issue_activities {
+            Ok(items) => Ok(Listing {
+                items: items.clone(),
+                truncated: self.truncate,
+            }),
+            Err(e) => Err(err(e, "activities")),
+        }
+    }
 }
 
 /// An unresolved issue whose `State` custom field is an object `{name: state}`.
@@ -160,7 +178,24 @@ pub fn activity_on_issue(category: &str, id: &str, timestamp_ms: i64) -> YtActiv
             id_readable: Some(id.into()),
             issue: None,
         }),
+        field: None,
+        added: None,
     }
+}
+
+/// The two activities YouTrack records when an issue is moved into a resolved state.
+pub fn resolve_activities(id: &str, timestamp_ms: i64) -> Vec<YtActivity> {
+    let mut resolved = activity_on_issue("IssueResolvedCategory", id, timestamp_ms);
+    resolved.field = Some(YtField {
+        name: Some("resolved date".into()),
+    });
+    resolved.added = Some(serde_json::json!(timestamp_ms));
+    let mut state = activity_on_issue("CustomFieldCategory", id, timestamp_ms);
+    state.field = Some(YtField {
+        name: Some("State".into()),
+    });
+    state.added = Some(serde_json::json!([{ "name": "Done" }]));
+    vec![resolved, state]
 }
 
 /// An activity on a comment (`target.issue.idReadable`), e.g. `CommentsCategory`.
@@ -176,5 +211,7 @@ pub fn activity_on_comment(category: &str, id: &str, timestamp_ms: i64) -> YtAct
                 id_readable: id.into(),
             }),
         }),
+        field: None,
+        added: None,
     }
 }

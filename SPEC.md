@@ -83,6 +83,16 @@ YouTrack (REST API at `<url>/api`, bearer token):
    `updated: <start> .. <end>`) over the activities API if that is
    sufficient; designer verifies.
 
+Being closed by someone is not work (changed 2026-11-10; items 1 to 3 used to
+count any update):
+- An MR that is merged or closed, and whose only trace in the window is its
+  `updated_at`, is not listed. My own events in the window (push, comment,
+  approval, merge), creating it in the window, or a review requested in the
+  window (MR created in it) keep it.
+- Moving an issue into a resolved state (the resolved date being set together
+  with the state change, by anyone including me) does not count. An assigned
+  issue is not listed when that is all that happened to it in the window.
+
 Fetch GitLab and YouTrack concurrently. Deduplicate items.
 
 ## 4. Matching MRs ↔ issues
@@ -100,18 +110,22 @@ Issues with no MR and MRs with no issue are still shown.
 
 ## 5. Output / UI (CONFIRMED: interactive list)
 
-- Default: interactive terminal list (e.g. `inquire`/`dialoguer`-style
-  select, or a small ratatui list if needed). Each row shows:
+- Default: interactive terminal list (ratatui). Each row shows:
   - issue ID, title,
     MR `project!iid`, **current state** (MR: opened/draft/merged/
-    closed; Issue: YouTrack `State` field), last-updated time, my role
-    (author / reviewer / commenter).
+    closed; Issue: YouTrack `State` field), last-updated time.
+  - A detail pane below the list shows the selected task in full: the
+    untruncated issue summary and every MR title, with state, my role
+    (author / reviewer / commenter), last-updated time, project path and
+    branch. (Changed 2026-11-10; roles used to be a list column, and titles
+    were only shown truncated.)
   - One row per task (issue with its MR(s), issue without MR, or MR
     without issue), all rows with the same columns; colour per column.
     (Changed 2026-10-02; was: issue line with its MR(s) beneath.)
 - Enter opens the selected item's web URL in the browser (`xdg-open` /
-  `open` crate). Opening an issue group opens the MR if there is exactly one,
-  otherwise offers the choice. `q`/Esc quits.
+  `open` crate): the MR (the most recently updated one), or the issue when
+  there is no MR. `i` opens the issue, `1`-`9` the n-th MR. `q`/Esc quits.
+  (Changed 2026-11-10; was a sub-menu for groups with several MRs.)
 - `--plain` (or non-TTY stdout) prints a static table instead; `--json`
   dumps the merged data.
 - Show the resolved time window and counts in a header.
@@ -130,5 +144,5 @@ Issues with no MR and MRs with no issue are still shown.
   done by the owner afterwards.
 - Keep dependencies reasonable: clap, serde/serde_json, toml, reqwest
   (blocking or tokio — designer picks one and sticks with it), chrono,
-  directories/xdg, anyhow/thiserror, regex, inquire or dialoguer, open.
+  directories/xdg, anyhow/thiserror, regex, ratatui, open.
 - README.md documenting install, config, usage.

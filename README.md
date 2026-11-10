@@ -129,16 +129,38 @@ work-tracker -v              # log every HTTP request (never tokens) to stderr
 work-tracker --config ./my.toml
 ```
 
-Interactive list: Enter opens the selected item in the browser, arrow keys
-move, Esc or `q` quits. Each task is one row: an issue together with its
-MR(s), an issue without MR, or an MR without issue. All rows share the same
-columns, under a header line: issue ID, MR (`project!iid`, `+N` when the
-issue has more MRs), title, issue state, MR state, last-updated time and your
-roles (author, reviewer, approver, commenter, assignee, updater, ...). A `-`
-marks a missing issue or MR. Columns are coloured on a terminal that allows it
-(`NO_COLOR` turns it off). A row with exactly one MR opens that MR; a row with
-several MRs asks which one to open (or the issue itself). `--plain` prints the
-same columns followed by every URL of the row (issue first, then the MRs).
+Interactive list: each task is one row: an issue together with its MR(s), an
+issue without MR, or an MR without issue. All rows share the same columns,
+under a header line: issue ID, MR (`project!iid`, `+N` when the issue has
+more MRs), title, issue state, MR state and last-updated time. A `-` marks a
+missing issue or MR. On a narrow terminal the last-updated and MR state
+columns are dropped so the title keeps at least 24 columns.
+
+Below the table, a detail pane describes the selected row in full: the whole
+issue summary and the whole title of every MR (wrapped, never cut), each with
+its state, your roles (author, reviewer, approver, commenter, assignee,
+updater, ...), its last-updated time and, for MRs, the full project path and
+source branch. Enter opens the MR (the most recently updated one), `i` opens
+the issue, and `1`-`9` open the n-th MR when a row has several. Colours are
+used on a terminal that allows them (`NO_COLOR` turns them off).
+
+`--plain` prints the table columns plus your roles and every URL of the row
+(issue first, then the MRs).
+
+### What counts as work
+
+Being closed is not work. Two kinds of items are therefore left out:
+
+- **MRs somebody else merged or closed.** An MR you authored before the
+  window, or review, is not listed when its only trace in the window is that
+  it is now merged or closed. Anything you did yourself in the window keeps
+  it: creating it, pushing to its branch, commenting, approving, merging. A
+  review requested in the window (MR created in it) is listed too.
+- **Issues that were only moved to a resolved state.** Setting an issue to
+  `Done` (by you or by anyone else) does not list it. An issue assigned to
+  you stays out when that is the only thing that happened to it in the
+  window; any other change or comment, by anyone, keeps it. If an MR in the
+  list refers to such an issue, the issue is still shown with that MR.
 
 Accepted date/time formats for `--since`, `--until` and `--now`:
 `2026-09-29T10:00`, `2026-09-29T10:00:30`, `"2026-09-29 10:00"`, `2026-09-29`
@@ -169,8 +191,12 @@ The resolved window is always printed at the top of the report.
 | Key | Action |
 |---|---|
 | Up / Down (or `k` / `j`) | Move the selection |
-| Enter | Open the selected item in the browser (a group with several MRs asks which one) |
-| Esc or `q` | Quit |
+| PageUp / PageDown | Move ten rows |
+| Home / End (or `g` / `G`) | First / last row |
+| Enter | Open the MR in the browser (the most recently updated one; the issue when the row has no MR) |
+| `i` | Open the issue in the browser |
+| `1` - `9` | Open the n-th MR of the row, as numbered in the detail pane |
+| Esc, `q` or Ctrl-C | Quit |
 
 ## How the window is computed
 
@@ -269,9 +295,9 @@ Matching rules:
   a warning.
 - **An MR referencing two issues appears twice**, once under each issue
   group. It is counted once in the totals.
-- **Single-MR groups.** In a group with exactly one MR the interactive list
-  opens the MR, so the YouTrack issue URL is available only through
-  `--plain` (URL column) and `--json` (`web_url`).
+- **Closed-only detection needs the full activity categories.** If the
+  YouTrack server rejects some activity categories (a warning says so), issues
+  that were only moved to a resolved state stay listed.
 - **Project short names containing `_` are not recognised** in MR text. IDs
   such as `MY_PROJ-12` are not matched (the underscore is treated as a
   separator, so `feature_SP-123` still finds `SP-123`).

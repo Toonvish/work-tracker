@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, NaiveDate, Utc};
 
 use super::{
-    ACTIVITY_PAGE_CAP, ActivityQuery, CORE_CATEGORIES, FULL_CATEGORIES, ISSUE_PAGE_CAP,
-    YouTrackApi, YtActivity, YtIssue, YtSettings, project_clause,
+    ACTIVITY_PAGE_CAP, ActivityQuery, CORE_CATEGORIES, FIELD_CATEGORY, FULL_CATEGORIES,
+    ISSUE_PAGE_CAP, RESOLVED_CATEGORY, YouTrackApi, YtActivity, YtIssue, YtSettings,
+    project_clause,
 };
 use crate::error::ApiError;
 use crate::http::Listing;
@@ -295,8 +296,8 @@ fn in_window_issues(
 
 /// Result of the activities chain.
 enum Activities {
-    /// Raw activities from `/api/activities`.
-    Events(Vec<YtActivity>),
+    /// Raw activities from `/api/activities`, and whether the full category set was used.
+    Events(Vec<YtActivity>, bool),
     /// Complete issues from the approximate query fallback.
     Issues(Vec<Issue>),
 }
@@ -402,10 +403,10 @@ fn fetch_changed(
     warnings: &mut Vec<String>,
 ) -> Result<Activities, ApiError> {
     let fallback_status = match activities_full(api, window, settings, warnings) {
-        Ok(items) => return Ok(Activities::Events(items)),
+        Ok(items) => return Ok(Activities::Events(items, true)),
         Err(e) => match e.status() {
             Some(400) => match activities_core(api, window, settings, warnings) {
-                Ok(items) => return Ok(Activities::Events(items)),
+                Ok(items) => return Ok(Activities::Events(items, false)),
                 Err(e) => match e.status() {
                     Some(s @ (400 | 404)) => s,
                     _ => return Err(e),
@@ -419,22 +420,78 @@ fn fetch_changed(
         .map(Activities::Issues)
 }
 
-/// Issue id and role of each in-window activity. Unparseable or out-of-window ones are skipped.
-fn activity_roles(activities: &[YtActivity], window: &Window) -> BTreeMap<IssueId, BTreeSet<Role>> {
+/// The issue an activity belongs to, when its id parses.
+fn activity_issue(a: &YtActivity) -> Option<IssueId> {
+    let target = a.target.as_ref()?;
+    target
+        .id_readable
+        .as_deref()
+        .or_else(|| target.issue.as_ref().map(|i| i.id_readable.as_str()))?
+        .parse()
+        .ok()
+}
+
+fn category(a: &YtActivity) -> Option<&str> {
+    a.category.as_ref().map(|c| c.id.as_str())
+}
+
+/// In-window activities with their issue. Unparseable or out-of-window ones are skipped.
+fn in_window_activities<'a>(
+    activities: &'a [YtActivity],
+    window: &Window,
+) -> Vec<(IssueId, &'a YtActivity)> {
+    activities
+        .iter()
+        .filter(|a| millis(a.timestamp).is_some_and(|t| window.contains(t)))
+        .filter_map(|a| Some((activity_issue(a)?, a)))
+        .collect()
+}
+
+/// `(issue, timestamp)` of every activity that set an issue's resolved date.
+fn resolve_moments(activities: &[(IssueId, &YtActivity)]) -> BTreeSet<(IssueId, i64)> {
+    activities
+        .iter()
+        .filter(|(_, a)| category(a) == Some(RESOLVED_CATEGORY) && a.added.is_some())
+        .map(|(id, a)| (id.clone(), a.timestamp))
+        .collect()
+}
+
+/// True for the bookkeeping of closing an issue: the resolved date being set, and the
+/// state-field change made in the same moment (`In Review` to `Done`). Not work by itself.
+fn is_closing(
+    id: &IssueId,
+    a: &YtActivity,
+    moments: &BTreeSet<(IssueId, i64)>,
+    state_field: &str,
+) -> bool {
+    match category(a) {
+        Some(RESOLVED_CATEGORY) => a.added.is_some(),
+        Some(FIELD_CATEGORY) => {
+            let is_state = a
+                .field
+                .as_ref()
+                .and_then(|f| f.name.as_deref())
+                .is_some_and(|n| n.eq_ignore_ascii_case(state_field));
+            is_state && moments.contains(&(id.clone(), a.timestamp))
+        }
+        _ => false,
+    }
+}
+
+/// Issue id and roles from my in-window activities. Closing an issue gives no role.
+fn activity_roles(
+    activities: &[YtActivity],
+    window: &Window,
+    state_field: &str,
+) -> BTreeMap<IssueId, BTreeSet<Role>> {
+    let activities = in_window_activities(activities, window);
+    let moments = resolve_moments(&activities);
     let mut out: BTreeMap<IssueId, BTreeSet<Role>> = BTreeMap::new();
-    for a in activities {
-        if !millis(a.timestamp).is_some_and(|t| window.contains(t)) {
+    for (id, a) in activities {
+        if is_closing(&id, a, &moments, state_field) {
             continue;
         }
-        let Some(target) = &a.target else { continue };
-        let raw = target
-            .id_readable
-            .as_deref()
-            .or_else(|| target.issue.as_ref().map(|i| i.id_readable.as_str()));
-        let Some(id) = raw.and_then(|r| r.parse::<IssueId>().ok()) else {
-            continue;
-        };
-        let role = match a.category.as_ref().map(|c| c.id.as_str()) {
+        let role = match category(a) {
             Some("CommentsCategory" | "CommentTextCategory" | "CommentAttachmentsCategory") => {
                 Role::Commenter
             }
@@ -443,6 +500,66 @@ fn activity_roles(activities: &[YtActivity], window: &Window) -> BTreeMap<IssueI
         out.entry(id).or_default().insert(role);
     }
     out
+}
+
+/// Takes assigned issues out of the window when nothing happened to them in it except
+/// being closed (by anyone). `mine` holds the issues I did real work on. Such an issue
+/// stays in the list as not in the window, so an MR that references it still shows it.
+fn unlist_closed_only(
+    api: &dyn YouTrackApi,
+    window: &Window,
+    settings: &YtSettings,
+    issues: &mut BTreeMap<IssueId, Issue>,
+    mine: &BTreeMap<IssueId, BTreeSet<Role>>,
+    warnings: &mut Vec<String>,
+) -> Result<(), ApiError> {
+    let candidates: Vec<IssueId> = issues
+        .keys()
+        .filter(|id| !mine.contains_key(*id))
+        .cloned()
+        .collect();
+    for chunk in candidates.chunks(BATCH_CHUNK) {
+        let query = ActivityQuery {
+            issue_query: Some(
+                chunk
+                    .iter()
+                    .map(|id| format!("issue id: {id}"))
+                    .collect::<Vec<_>>()
+                    .join(" or "),
+            ),
+            ..activity_query(window, settings, FULL_CATEGORIES)
+        };
+        let listing = match api.issue_activities(&query) {
+            Ok(listing) => listing,
+            Err(e) if e.status() == Some(401) => return Err(e),
+            Err(e) => {
+                warnings.push(format!(
+                    "YouTrack: cannot read issue activities ({e}); issues that were only closed stay listed"
+                ));
+                return Ok(());
+            }
+        };
+        if listing.truncated {
+            continue; // incomplete history: keep the issues
+        }
+        let activities = in_window_activities(&listing.items, window);
+        let moments = resolve_moments(&activities);
+        let mut closed: BTreeSet<&IssueId> = BTreeSet::new();
+        let mut worked: BTreeSet<&IssueId> = BTreeSet::new();
+        for (id, a) in &activities {
+            if is_closing(id, a, &moments, &settings.state_field) {
+                closed.insert(id);
+            } else {
+                worked.insert(id);
+            }
+        }
+        for id in closed.difference(&worked) {
+            if let Some(issue) = issues.get_mut(*id) {
+                issue.in_window = false;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Collects everything YouTrack contributes to the report (6.1 to 6.3, then fetch-by-ID).
@@ -467,8 +584,8 @@ pub fn collect(
                 merge_issue(&mut issues, issue);
             }
         }
-        Activities::Events(activities) => {
-            let roles = activity_roles(&activities, window);
+        Activities::Events(activities, full) => {
+            let roles = activity_roles(&activities, window, &settings.state_field);
             let mut to_fetch = Vec::new();
             for (id, r) in &roles {
                 match issues.get_mut(id) {
@@ -497,6 +614,10 @@ pub fn collect(
                     }
                 }
             }
+            // Only the full category set reports when an issue was resolved.
+            if full {
+                unlist_closed_only(api, window, settings, &mut issues, &roles, &mut warnings)?;
+            }
         }
     }
 
@@ -512,7 +633,9 @@ mod tests {
     use super::*;
     use crate::http::FakeErr;
     use crate::window::WindowOrigin;
-    use crate::youtrack::fakes::{FakeYouTrack, activity_on_comment, activity_on_issue, yt_issue};
+    use crate::youtrack::fakes::{
+        FakeYouTrack, activity_on_comment, activity_on_issue, resolve_activities, yt_issue,
+    };
 
     const IN: i64 = 1_790_683_200_000; // 2026-09-29T12:00Z
     const OUT_AFTER: i64 = 1_790_856_000_000; // 2026-10-01T12:00Z
@@ -1383,5 +1506,108 @@ mod tests {
             .insert("issue id: SP-1".into(), Err(FakeErr::Unauthorized));
         let mut w = Vec::new();
         assert!(fetch_referenced(&f, &ids(&["SP-1"]), &settings(), &mut w).is_err());
+    }
+
+    fn assigned(f: &mut FakeYouTrack, ids: &[&str]) {
+        let issues = ids.iter().map(|i| yt_issue(i, "x", IN, "Done")).collect();
+        f.add_search(Q_ASSIGNED, issues);
+    }
+
+    #[test]
+    fn assigned_issue_only_closed_by_someone_is_not_in_window() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1", "SP-2"]);
+        f.issue_activities = Ok(resolve_activities("SP-1", IN));
+        let o = run(&f);
+        assert!(!issue_of(&o, "SP-1").in_window);
+        assert!(issue_of(&o, "SP-2").in_window, "no activities: kept");
+        assert!(o.warnings.is_empty());
+        assert_eq!(
+            f.calls_with("issue_activities"),
+            vec!["issue_activities 15 issue id: SP-1 or issue id: SP-2"]
+        );
+    }
+
+    #[test]
+    fn closed_issue_with_other_activity_stays_in_window() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1", "SP-2", "SP-3"]);
+        let mut all = resolve_activities("SP-1", IN);
+        all.push(activity_on_comment("CommentsCategory", "SP-1", IN + 1));
+        // A state change that does not resolve the issue is ordinary work.
+        let mut moved = resolve_activities("SP-2", IN).remove(1);
+        moved.timestamp = IN + 5;
+        all.push(moved);
+        // Closed, but outside the window.
+        all.extend(resolve_activities("SP-3", OUT_BEFORE));
+        f.issue_activities = Ok(all);
+        let o = run(&f);
+        for i in ["SP-1", "SP-2", "SP-3"] {
+            assert!(issue_of(&o, i).in_window, "{i}");
+        }
+    }
+
+    #[test]
+    fn closing_an_issue_myself_is_not_work() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1"]);
+        // SP-1 is assigned, SP-2 is not: neither is listed for the closing alone.
+        let mut mine = resolve_activities("SP-1", IN);
+        mine.extend(resolve_activities("SP-2", IN));
+        f.activities = vec![(15, Ok(mine.clone()))];
+        f.issue_activities = Ok(mine);
+        let o = run(&f);
+        assert_eq!(o.issues.len(), 1);
+        assert!(!issue_of(&o, "SP-1").in_window);
+        assert_eq!(issue_of(&o, "SP-1").roles, roles(&[Role::Assignee]));
+        assert!(f.calls_with("issue_by_id").is_empty());
+    }
+
+    #[test]
+    fn reopening_and_my_other_changes_count_as_work() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1", "SP-2"]);
+        let mut reopened = resolve_activities("SP-1", IN);
+        reopened[0].added = None;
+        let mut mine = resolve_activities("SP-2", IN);
+        mine.push(activity_on_comment("CommentsCategory", "SP-2", IN));
+        mine.extend(reopened);
+        f.activities = vec![(15, Ok(mine))];
+        let o = run(&f);
+        assert_eq!(
+            issue_of(&o, "SP-1").roles,
+            roles(&[Role::Assignee, Role::Updater])
+        );
+        assert_eq!(
+            issue_of(&o, "SP-2").roles,
+            roles(&[Role::Assignee, Role::Commenter])
+        );
+        assert!(o.issues.iter().all(|i| i.in_window));
+        assert!(f.calls_with("issue_activities").is_empty());
+    }
+
+    #[test]
+    fn issue_activities_failure_keeps_issues_with_a_warning() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1"]);
+        f.issue_activities = Err(FakeErr::Status(500));
+        let o = run(&f);
+        assert!(issue_of(&o, "SP-1").in_window);
+        assert_eq!(o.warnings.len(), 1, "{:?}", o.warnings);
+        assert!(o.warnings[0].contains("only closed stay listed"));
+
+        f.issue_activities = Err(FakeErr::Unauthorized);
+        assert!(collect(&f, &win(), &settings()).is_err());
+    }
+
+    #[test]
+    fn core_category_fallback_skips_the_closed_check() {
+        let mut f = FakeYouTrack::new();
+        assigned(&mut f, &["SP-1"]);
+        f.activities = vec![(15, Err(FakeErr::Status(400))), (5, Ok(vec![]))];
+        f.issue_activities = Ok(resolve_activities("SP-1", IN));
+        let o = run(&f);
+        assert!(issue_of(&o, "SP-1").in_window);
+        assert!(f.calls_with("issue_activities").is_empty());
     }
 }

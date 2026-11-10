@@ -21,14 +21,14 @@ with aws-lc-rs, which builds on this machine).
 | Topic | Decision |
 |---|---|
 | HTTP | `reqwest` **blocking**. No direct tokio dependency. Concurrency uses `std::thread::scope` (GitLab and YouTrack run in parallel threads). |
-| Interactive UI | `dialoguer::Select::interact_opt()` gives Enter to select and Esc/`q` to quit natively. `console` handles widths and colors. |
+| Interactive UI | ratatui (crossterm backend) in an inline viewport: a table of tasks plus a detail pane with the full text of the selected one. `console` handles widths and colors of the plain table. |
 | Config path | Resolved by hand (no `directories` crate, because it is not Linux-style on macOS): `--config` > `$XDG_CONFIG_HOME/work-tracker/config.toml` > `$HOME/.config/work-tracker/config.toml`. |
 | Time window | Generic over `Tz: TimeZone`. Production uses `chrono::Local`. Tests use `chrono_tz::Europe::Berlin` (dev-dependency) so DST tests are deterministic. |
 | GitLab | 3 global queries: authored MRs, reviewer MRs, and `/users/:id/events`. Extra MRs found only through events are fetched per project with `iids[]`. |
 | YouTrack | Assigned issues use the query language. "Changed/commented by me in window" uses **`/api/activities?author=me&start&end`**, because the query language cannot express it. On 400 the request is retried with a core category set, and only after that does it fall back to the query language. |
 | Fetch by ID | A batched `issue id: A or issue id: B` search is only an optimisation. Results are filtered to the requested IDs, every missing ID is fetched one by one, and moved/renamed issues produce an alias map that rewrites MR references. |
 | Matching | A lenient regex (project = letters/digits, **no `_`**) plus character-boundary checks, then **filtering against the real YouTrack project short names** (`/api/admin/projects`, or the configured `projects`), which removes false positives such as `UTF-8`. |
-| Interactive labels | Plain text (no embedded ANSI), width = terminal columns − 3, so dialoguer's 2-column prefix never makes a row wrap. |
+| Interactive rows | The title is the flexible column and is cut with `…`; the detail pane shows it in full. Narrow terminals drop UPDATED, then MR STATE. |
 | Exit codes | 0 ok, 1 runtime failure, 2 usage/config error, 3 partial results (one source failed). |
 
 ---
@@ -69,7 +69,8 @@ work-tracker/
 │   └── ui/
 │       ├── mod.rs             # OutputMode selection, header rendering
 │       ├── rows.rs            # Row model + formatting (pure, unit-tested)
-│       ├── interactive.rs     # dialoguer loop + open::that_detached
+│       ├── detail.rs          # full text of one task for the detail pane; what each key opens
+│       ├── interactive.rs     # ratatui table + detail pane + open::that_detached
 │       ├── plain.rs           # static table
 │       └── json.rs            # serde JSON output
 └── tests/
@@ -258,8 +259,8 @@ path = "src/main.rs"
 anyhow     = "1.0.104"
 chrono     = { version = "0.4.45", features = ["serde"] }
 clap       = { version = "4.6.7", features = ["derive"] }
-console    = "0.16.6"          # same major as dialoguer's dependency; widths, truncation, colors (honours NO_COLOR)
-dialoguer  = "0.12.0"          # Select::interact_opt => Enter / Esc / q
+console    = "0.16.6"          # widths, truncation, colors (honours NO_COLOR)
+ratatui    = { version = "0.30.2", default-features = false, features = ["crossterm"] }   # interactive list
 open       = "5.4.4"           # open::that_detached(url)
 regex      = "1.13.1"
 reqwest    = { version = "0.13.5", features = ["blocking", "json", "query"] }
@@ -769,9 +770,15 @@ YouTrack activities 25. A truncated listing produces the warning from 1.2.
 
 Let `ev(mr)` be the set of my in-window events attributed to the MR (5.5).
 An MR is included in the report when **any** of these holds:
-1. `author.id == uid` and (`W.contains(created_at)` or `W.contains(updated_at)` or `ev(mr)` is non-empty, or an in-window push to its source branch exists). Role: **Author**.
-2. `uid ∈ reviewers[].id` and (`W.contains(updated_at)` or `ev(mr)` is non-empty). Role: **Reviewer**.
+1. `author.id == uid` and (`W.contains(created_at)` or `touched(mr)` or `ev(mr)` is non-empty, or an in-window push to its source branch exists). Role: **Author**.
+2. `uid ∈ reviewers[].id` and (`W.contains(created_at)` or `touched(mr)` or `ev(mr)` is non-empty). Role: **Reviewer**.
 3. `ev(mr)` is non-empty. Roles come from the event classification.
+
+`touched(mr)` = `W.contains(updated_at)` and the MR is neither `merged` nor
+`closed`. A finished MR whose only trace in the window is `updated_at` was
+merged or closed by someone else, which is not work of mine; my own merge
+leaves an event (rule 3). A review requested in the window (MR created in
+it) counts even when the MR is merged by now.
 
 Roles accumulate in a `BTreeSet`. For example, an author who also commented
 gets {author, commenter}.
@@ -980,6 +987,24 @@ roles into those issues. The remaining IDs are fetched with `fetch_by_ids`
 (6.4) and become issues with `in_window = true` and the activity roles.
 IDs the fetch reports as missing are dropped silently. Aliases from that
 fetch are ignored here, because activity IDs are already canonical.
+
+**Closing an issue is not work.** The activity fields are
+`timestamp,category(id),field(name),added(name),target(idReadable,issue(idReadable))`.
+A *closing* activity is an `IssueResolvedCategory` activity with a non-null
+`added` (the resolved date being set), or a `CustomFieldCategory` activity
+on the state field (`settings.state_field`) with the same issue and
+timestamp as one (YouTrack records `In Review → Done` as exactly this
+pair). Clearing the resolved date (reopening) is ordinary work.
+- My closing activities give no role, so they never list an issue.
+- `unlist_closed_only`: for the issues of 6.2 that none of my activities
+  kept, `issue_activities` (the same request without `author=me`, with
+  `issueQuery = issue id: A or issue id: B`, 20 IDs per request) returns
+  what anyone did in the window. An issue with at least one closing
+  activity and nothing else gets `in_window = false`: 7.5 then shows it
+  only under an MR that references it. No activities at all, a truncated
+  listing or an error (warning; 401 is fatal) keep the issue.
+- This runs only when the full category set succeeded; the core set has no
+  `IssueResolvedCategory`.
 
 ### 6.4 Fetching issues by ID (`fetch_by_ids`, in `youtrack/collect.rs`)
 
@@ -1234,11 +1259,6 @@ Window: Tue 29 Sep 10:00 → Wed 30 Sep 11:00  (1d 1h, since Tue 09:00–10:00 m
 ### 8.3 Rows (`ui/rows.rs`, pure)
 
 ```rust
-#[derive(Debug, Clone, PartialEq)]
-pub enum Target {
-    Url(String),
-    ChooseMr { issue_url: String, mrs: Vec<(String /* label: "!456 group/proj  <title>" */, String /* url */)> },
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStyle { Opened, Draft, Merged, Closed, IssueOpen, IssueResolved }
 #[derive(Debug, Clone, PartialEq)]
@@ -1250,22 +1270,24 @@ pub struct Row {
     pub title: String,
     pub issue_state: Option<State>, pub mr_state: Option<State>,
     pub updated: String,             // already formatted (local time)
-    pub roles: String, pub urls: Vec<String>, pub target: Target,
+    pub roles: String, pub urls: Vec<String>,
 }
+/// Column widths of the plain table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout { Interactive { width: usize }, Plain { title_width: usize, roles_width: usize } }
+pub struct Layout { pub title_width: usize, pub roles_width: usize }
 pub fn build_rows<Tz: TimeZone>(report: &Report, tz: &Tz, now_year: i32) -> Vec<Row>;
 pub fn plain_layout(rows: &[Row]) -> Layout;
-pub fn format_row(row: &Row, layout: Layout, color: bool) -> String;
+pub fn format_row(row: &Row, layout: Layout, color: bool) -> String;      // plain table
 pub fn format_header(layout: Layout, color: bool) -> String;
 ```
 `build_rows` emits **one row per entry**, in entry order, so every row has
 the same columns. An `Entry::Issue` row carries the issue and its MRs; an
 `OrphanMr` row leaves the issue cells empty. Every text cell goes through
-`text::sanitize_line`, so no label contains a newline, tab or ESC.
+`text::sanitize_line`, so no label contains a newline, tab or ESC. Both the
+plain table and the interactive table are built from these rows.
 
 Columns, separated by 2 spaces, with a header line (`ISSUE  MR  TITLE  ISSUE
-STATE  MR STATE  UPDATED  ROLES`, plus `URL` in plain) above the rows:
+STATE  MR STATE  UPDATED`, plus `ROLES  URL` in plain) above the rows:
 
 | col | width | content |
 |---|---|---|
@@ -1275,87 +1297,71 @@ STATE  MR STATE  UPDATED  ROLES`, plus `URL` in plain) above the rows:
 | issue state | 12 | YouTrack state; `-` for an orphan MR |
 | mr state | 8 | state of the MR in the mr column: `opened`/`draft`/`merged`/`closed`/`locked`; `-` without MR |
 | updated | 11 | latest of the issue and its MRs; local `%m-%d %H:%M`, for another year `%Y-%m-%d` |
-| roles | 18 (interactive) / widest, at least 18 (plain) | union of issue and MR roles joined with `,`. `Referenced` shows as `ref`, and only when it is the sole role. |
+| roles (plain only) | widest, at least 18 | union of issue and MR roles joined with `,`. `Referenced` shows as `ref`, and only when it is the sole role. |
 
-Every column except the last is padded with `console::pad_str` and truncated
-with `console::truncate_str(s, w, "…")`. Both are Unicode-width aware.
+**Plain:** `plain_layout(&rows)`: `title_width` = min(80, widest title), at
+least 5; `roles_width` = widest roles, at least 18, so the links line up.
+Cells are padded with `console::pad_str` and truncated with `…` (both
+Unicode-width aware); roles are not truncated. The last column lists the
+URLs (issue first, then every MR), so links are clickable in a terminal.
+There are no trailing spaces.
 
-Widths:
-- **Interactive:** `Layout::Interactive { width }` with
-  `width = term_cols − 3`. dialoguer 0.12's `ColorfulTheme` renders each item
-  as `"{prefix} {text}"`, which adds 2 columns, plus 1 safety column. The
-  fixed columns take 9+16+12+8+11+18 = 74, plus 6 separators × 2 = 86.
-  `title_width = max(20, width − 86)`. As a last step, truncate the whole
-  label to `width` with `console::truncate_str(label, width, "…")`, so
-  `console::measure_text_width(label) <= width` **always** holds (tested at
-  widths 60, 101 and 160, with and without colour). Do not pad trailing
-  spaces after the roles column.
-- **Plain:** `plain_layout(&rows)`: `title_width` = min(80, widest title),
-  at least 5; `roles_width` = widest roles, at least 18, so the links line
-  up. Roles are not truncated. The last column lists the URLs (issue first,
-  then every MR), so links are clickable in a terminal. There are no
-  trailing spaces.
+Colour (`color = true` on a TTY that allows it, `console::colors_enabled()`
+respects `NO_COLOR`): issue id cyan bold, MR ref bright blue, updated and
+roles dim, `-` placeholders dim, header bold. States: merged = magenta,
+opened = green, draft = yellow, closed/locked = red, issue resolved = dim.
+The visible text is identical with and without colour.
 
-Colour (`color = true` on a TTY that allows it, `console::colors_enabled()` /
-`colors_enabled_stderr()` respect `NO_COLOR`): issue id cyan bold, MR ref
-bright blue, updated and roles dim, `-` placeholders dim, header bold. States:
-merged = magenta, opened = green, draft = yellow, closed/locked = red, issue
-resolved = dim. The visible text is identical with and without colour.
+### 8.4 Interactive list (`ui/interactive.rs`, `ui/detail.rs`)
 
-### 8.4 Interactive loop (`ui/interactive.rs`)
+ratatui with the crossterm backend, in an **inline viewport** below the
+window line, the counts and the warnings (they stay visible; no alternate
+screen). Top to bottom:
 
 ```
-(term_rows, term_cols) = console::Term::stdout().size()
-width  = term_cols.saturating_sub(3).max(40)
-rows   = build_rows(report, &Local, now_year)
-plain, colored = rows.map(|r| format_row(r, Layout::Interactive { width }, false / colors_enabled_stderr()))
-// The window line, counts, warnings and the help line are printed BEFORE the Select,
-// outside dialoguer's redraw region. The column header is the Select prompt.
-used   = 3 (window, counts, help) + number of warning lines
-max_length = term_rows.saturating_sub(used + 1).max(3)    // 1 safety line. dialoguer 0.12 itself reserves 2 rows
-// for the prompt and page indicator: visible items = clamp(max_length, 3, term_rows) - 2 (dialoguer src/paging.rs)
-cursor = 0
-loop:
-    sel = Select::with_theme(&ListTheme { plain, colored, header: true, .. })
-            .with_prompt(format_header(..))      // cut by 16 cols when paged, for " [Page n/m] "
-            .items(&["0", "1", ...]).default(cursor).max_length(max_length)
-            .report(false)
-            .interact_opt()?                     // Some(i) on Enter, None on Esc/q
-    match sel:
-      None -> break (exit 0)
-      Some(i) -> cursor = i; match rows[i].target:
-         Url(u)                         -> open_url(u)
-         ChooseMr { issue_url, mrs }    -> // issue group with >= 2 MRs
-             items = mrs labels (truncated to width) + ["Open issue in YouTrack"]
-             sub = Select…interact_opt()?; Some(j) -> open selected; None -> back to main list
+  ISSUE      MR                TITLE                       ISSUE STATE   MR STATE  UPDATED
+❯ MS-1817    mailu!750         branding import export      In Review     opened    11-10 13:30
+  MS-1803    -                 Improve - Autocert-Logs     Open          -         11-10 11:28
+────────────────────────────────────────────────────────────────────────────────────── 1/16
+MS-1817  branding import export
+    In Review · commenter, updater · updated 11-09 13:48
+ups/mailu!750  feat(branding): Import and export brandings through RPCs, ms-1817
+    opened · author · updated 11-10 13:30 · ms-1817-branding-import-export
+↑/↓ move · Enter: open MR · i: open issue · 1-9: open n-th MR · q/Esc: quit
 ```
-`ListTheme` wraps `ColorfulTheme`. dialoguer only sees index keys and the
-theme renders `colored[i]` (inactive) or `plain[i]` (active, so the cyan
-highlight covers the whole row). Reason: dialoguer 0.12 sizes items by their
-**byte** length when redrawing (`prompts/select.rs`), so ANSI codes or
-non-ASCII text in a full-width label made it clear lines above the list. The
-prompt is written as `"  {header}"`, aligned with the item prefix. The MR
-sub-menu uses the same theme with the normal `? <help> ›` prompt.
 
-Target rules (`build_rows` sets them; they are unit-tested):
-- An issue row with exactly 1 MR opens that MR's URL (SPEC).
-- An issue row with ≥2 MRs offers the choice (`ChooseMr`), including
-  "Open issue in YouTrack".
-- An issue row without MR opens the issue.
-- An orphan MR row opens that MR.
+- **Table** (`Table` + `TableState`, scrolls when the rows do not fit): the
+  cells of 8.3 without roles. The title takes the remaining width and is cut
+  with `…`. `Columns::for_width` drops UPDATED, then MR STATE, while the
+  title would get fewer than 24 columns. The selected row is drawn reversed
+  and without cell colours, behind a `❯ ` marker.
+- **Detail pane** (`Paragraph` with wrapping, top border carrying `n/total`):
+  `detail::items(entry)` gives the issue (when there is one) and then every
+  MR. Each item is two lines: reference (`SP-123`, or the full
+  `group/proj!456`) and the **whole** title, then state and meta (roles,
+  `by <author>` for someone else's MR, `updated …`, source branch,
+  `refers to …` for an orphan MR's unresolved issue IDs). With two or more
+  MRs each MR line starts with its number. Height: two lines per item of the
+  largest entry plus one spare line for wrapping, at most 9, plus the border.
+- **Help line**, replaced by the result of the last open (`Opened <url>`, an
+  error, or why there was nothing to open) until the selection moves.
 
-**Decision (known limitation, in README):** for an issue with exactly one MR,
-the YouTrack issue cannot be opened from the interactive list. SPEC fixes
-that the row opens the MR.
-The issue URL is available through `--plain` (URL column) and `--json`
-(`web_url`).
+Viewport height = column header + rows + detail pane + help line, limited to
+the terminal rows left below the header lines (at least 8).
 
-`open_url(u)`: `open::that_detached(u)`. Afterwards print
-`Opened <u>` to stderr. On error print
-`warning: could not open browser (<err>); URL: <u>` and continue the loop.
-A `dialoguer::Error` (IO, for example when the terminal goes away) becomes a
-runtime error (exit 1). Ctrl-C ends the process (default behaviour); no
-handler is needed.
+Keys (`action` maps a key to an `Action`, `handle` applies it; both tested):
+Up/`k`, Down/`j`, PageUp/PageDown (10 rows), Home/`g`, End/`G`; Enter,
+`i`, `1`-`9` open; Esc, `q`, Ctrl-C quit. `detail::url_for(items, Open)`:
+- `Default` (Enter): the first (most recently updated) MR, or the issue
+  when the row has no MR.
+- `Issue` (`i`): the issue; an orphan MR has none.
+- `Mr(n)`: the n-th MR.
+
+`open::that_detached(url)`; its result goes to the help line, never to
+stderr, which would disturb the viewport. On quit the viewport is cleared and
+the cursor returns to its first line, so the shell prompt follows the counts
+line. An IO error becomes a runtime error (exit 1). `ratatui::restore()`
+always runs, and ratatui's panic hook restores the terminal.
 
 ### 8.5 JSON (`ui/json.rs`)
 
@@ -1501,7 +1507,9 @@ and `cargo fmt --check`.
 | `youtrack::collect` (FakeYouTrack) | `project_clause` for 0/1/2 projects. Exact assigned query string: `assignee: me updated: 2026-09-27 .. 2026-10-02` and `(project: SP or project: MS) assignee: me updated: 2026-09-27 .. 2026-10-02`. Client-side `updated` filter. Activities → IDs from `target.idReadable` and `target.issue.idReadable`. Comment categories → Commenter, others → Updater. Fallback chain: FULL 400 then CORE OK → activities used, one warning, the fake recorded two activity calls; FULL 400 then CORE 400 → query fallback with exact query `(updater: me or commenter: me) updated: …`, two warnings; FULL 404 → query fallback directly; FULL 401 → `Err`. State extraction: object, array, string, null+resolved, null+unresolved, custom `state_field`. `fetch_by_ids`: exact batch query `issue id: SP-1 or issue id: SP-2`; chunking at 20 (45 IDs → 3 batch calls); an unrelated extra result in a batch is discarded; an ID missing from a successful batch is fetched with `issue_by_id`; batch 400 → every ID fetched individually; per-ID 404 → `missing`, no warning; alias (`issue_by_id("OLD-12")` returns `NEW-5`) → `aliases[OLD-12] = NEW-5` and NEW-5 kept; more than 50 per-ID fetches → warning; batch 401 → `Err`. `fetch_referenced` caps at 50 with a warning. A `project_short_names` failure → `admin_projects == None` plus a warning |
 | client URL builders | pure fns in `gitlab/client.rs` and `youtrack/client.rs` that return `reqwest::Url` for each request. Test query parameters (`scope=all`, `iids[]` repeated, events `after`/`before`, `$top`/`$skip = i*T`, `fields`, `categories`, `author=me`, ms timestamps, `issueQuery`) by parsing `url.query_pairs()` |
 | DTO deserialization | `tests/fixtures/*.json` (hand-written from the API docs), loaded with `include_str!`: GitLab MR list, events (MR approved, note on MR, push, issue note), user. YouTrack issues (with `$type` noise and the State field as an object), activities (comment and custom-field targets). Each deserializes and converts correctly |
-| `ui::rows` | one row per entry with issue/MR refs. Target rules (1 MR → `Url(mr)`, ≥2 → `ChooseMr`, 0 → `Url(issue)`, orphan → `Url(mr)`). MR-column left truncation keeps `!iid +N`. `format_row(Interactive{width: 120}, color=false)` matches an expected literal string; the header aligns with the rows. `measure_text_width(label) <= width` at widths 60, 101 and 160, with and without colour. Stripping colour gives the uncoloured row. A title containing `\n` is sanitized. A plain row ends with all its URLs and no trailing spaces. Updated-date format for the current and another year |
+| `ui::rows` | one row per entry with issue/MR refs. MR-column left truncation keeps `!iid +N`. The header aligns with the rows. Stripping colour gives the uncoloured row. A title containing `\n` is sanitized. A plain row ends with all its URLs and no trailing spaces. Updated-date format for the current and another year |
+| `ui::detail` | issue first, then every MR, with untruncated titles and meta; what Enter, `i` and `1`-`9` open for rows with 0, 1 and 2 MRs and for an orphan |
+| `ui::interactive` | `draw` on a ratatui `TestBackend`: table rows, detail pane of the selected row, wrapping of long titles, columns dropped on narrow terminals; key handling (move, clamp, quit, status message) |
 | `ui` (mod) | `format_counts` singular/plural; mode selection as a pure fn `select_mode(json, plain, stdout_tty, stderr_tty, stdin_tty) -> OutputMode` |
 | `ui::json` | the serialized output has the documented keys; roles lowercase; IssueId serialized as `"SP-123"`; origin `meeting` / `previous` / `explicit` |
 | `app` (unit tests in `src/app.rs`, using the fakes) | `build_report` with a fake GitLab and a fake YouTrack yields a linked group, an orphan, and a referenced issue fetched by ID. Alias: MR title `OLD-12 fix`, with the YouTrack fake resolving OLD-12 to NEW-5 → the MR sits under the NEW-5 group and there is no OLD-12 row. GitLab fake returns Unauthorized → YouTrack results present, `failed_sources == ["GitLab"]`. Both fail → `failed_sources.len() == enabled_sources == 2`. YouTrack `None` with `YtSettings.projects = ["SP"]` → an MR titled `SP-1 UTF-8 FIX-2` has `issue_ids == [SP-1]` |
@@ -1547,14 +1555,25 @@ Sections:
   - If the activities API is unavailable, "changed/commented by me" falls
     back to the approximate `updater:/commenter:` query.
   - An MR referencing two issues appears under both.
-  - In a group with exactly one MR, the interactive list opens the MR; the
-    issue URL is shown with `--plain`/`--json`.
+  - Issues that were only closed stay listed when the server rejects the
+    full activity categories.
   - YouTrack project short names containing `_` are not recognised in MR
     text.
 
 ---
 
 ## 12. Revision log
+
+Revision 4 (readability, closed items):
+- 8.3 / 8.4: the interactive list is a ratatui table with a detail pane that
+  shows the selected task in full (whole issue summary and MR titles, roles,
+  branch). Roles left the table, so the title column is 20 columns wider.
+  `i` opens the issue and `1`-`9` the n-th MR, which replaces the MR
+  sub-menu and lifts the single-MR limitation. dialoguer is gone.
+- 5.4: an MR merged or closed by someone else, without any activity of mine
+  in the window, is no longer included.
+- 6.3: closing an issue gives no role, and assigned issues that were only
+  closed in the window are taken out of it (`unlist_closed_only`).
 
 Revision 3 (list view):
 - 8.3 / 8.4: one row per task instead of an issue line with MR child rows.

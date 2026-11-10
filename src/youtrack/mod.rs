@@ -50,7 +50,16 @@ pub const CORE_CATEGORIES: &[&str] = &[
     "IssueCreatedCategory",
 ];
 
-/// Query for `GET /api/activities` (`author=me`, `reverse=true`).
+/// Category of the activity that sets or clears an issue's resolved date.
+pub const RESOLVED_CATEGORY: &str = "IssueResolvedCategory";
+/// Category of custom field changes, the state field among them.
+pub const FIELD_CATEGORY: &str = "CustomFieldCategory";
+
+/// Field selector for every activities request.
+pub const ACTIVITY_FIELDS: &str =
+    "timestamp,category(id),field(name),added(name),target(idReadable,issue(idReadable))";
+
+/// Query for `GET /api/activities` (`reverse=true`; `author=me` for `my_activities`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActivityQuery {
     pub categories: Vec<&'static str>,
@@ -66,8 +75,10 @@ pub trait YouTrackApi: Send + Sync {
     fn search_issues(&self, query: &str) -> Result<Listing<YtIssue>, ApiError>;
     /// A 404 gives `Ok(None)`.
     fn issue_by_id(&self, id: &str) -> Result<Option<YtIssue>, ApiError>;
-    /// Cap 25 pages.
+    /// Activities authored by me. Cap 25 pages.
     fn my_activities(&self, q: &ActivityQuery) -> Result<Listing<YtActivity>, ApiError>;
+    /// Activities by any author on the issues matching `q.issue_query`. Cap 25 pages.
+    fn issue_activities(&self, q: &ActivityQuery) -> Result<Listing<YtActivity>, ApiError>;
 }
 
 /// Settings for `collect`, built from the `[youtrack]` config section.
@@ -122,6 +133,17 @@ pub struct YtActivity {
     pub timestamp: i64,
     pub category: Option<YtCategory>,
     pub target: Option<YtTarget>,
+    /// The changed field, e.g. `State` or `resolved date`.
+    #[serde(default)]
+    pub field: Option<YtField>,
+    /// The new value; `None` when the change cleared the field.
+    #[serde(default)]
+    pub added: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct YtField {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

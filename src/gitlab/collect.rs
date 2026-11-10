@@ -145,16 +145,23 @@ fn roles_for(
     pushes: &BTreeSet<(u64, String)>,
 ) -> BTreeSet<Role> {
     let has_ev = ev.is_some_and(|s| !s.is_empty());
+    // A finished MR whose only trace in the window is its `updated_at` was merged or
+    // closed by someone else: that is not work of mine. My own merge leaves an event.
+    let finished = matches!(gl.state.as_str(), "merged" | "closed");
+    let touched = window.contains(gl.updated_at) && !finished;
     let mut roles = BTreeSet::new();
     if gl.author.id == uid
         && (window.contains(gl.created_at)
-            || window.contains(gl.updated_at)
+            || touched
             || has_ev
             || pushes.contains(&(gl.project_id, gl.source_branch.clone())))
     {
         roles.insert(Role::Author);
     }
-    if gl.reviewers.iter().any(|r| r.id == uid) && (window.contains(gl.updated_at) || has_ev) {
+    // A review requested in the window counts even when the MR is already merged.
+    if gl.reviewers.iter().any(|r| r.id == uid)
+        && (window.contains(gl.created_at) || touched || has_ev)
+    {
         roles.insert(Role::Reviewer);
     }
     if let Some(ev) = ev {
@@ -540,6 +547,44 @@ mod tests {
     }
 
     #[test]
+    fn mr_finished_by_someone_else_without_my_activity_is_excluded() {
+        let mut f = FakeGitLab::new();
+        // Authored before the window; a colleague merged or closed them in the window.
+        let mut merged = mr(1, 1, "a", "b1", "", ts(IN));
+        merged.created_at = ts(OUT_BEFORE);
+        merged.state = "merged".into();
+        let mut closed = merged.clone();
+        closed.iid = 2;
+        closed.state = "closed".into();
+        // Merged by me: the merge event keeps it.
+        let mut mine = merged.clone();
+        mine.iid = 3;
+        // Created in the window and merged: still my work.
+        let mut fresh = merged.clone();
+        fresh.iid = 4;
+        fresh.created_at = ts(IN);
+        // Reviewer of a merged MR without any event of mine.
+        let mut reviewed = merged.clone();
+        reviewed.iid = 5;
+        reviewed.author = GlUserRef {
+            id: 99,
+            username: "other".into(),
+        };
+        reviewed.reviewers = vec![GlUserRef {
+            id: 7,
+            username: "eric".into(),
+        }];
+        f.authored = Ok(vec![merged, closed, mine, fresh]);
+        f.reviewer = Ok(vec![reviewed]);
+        f.events = Ok(vec![ev_mr(1, 3, "accepted", ts(IN))]);
+        let o = run(&f);
+        let iids: Vec<u64> = o.mrs.iter().map(|m| m.iid).collect();
+        assert_eq!(iids, vec![3, 4]);
+        assert_eq!(roles(&o, 3), vec![Role::Author, Role::Merger]);
+        assert_eq!(roles(&o, 4), vec![Role::Author]);
+    }
+
+    #[test]
     fn reviewer_updated_in_window_is_reviewer() {
         let mut f = FakeGitLab::new();
         let mut m = mr(1, 5, "r", "b", "", ts(IN));
@@ -554,6 +599,7 @@ mod tests {
         let mut stale = m.clone();
         stale.iid = 6;
         stale.updated_at = ts(OUT_AFTER);
+        stale.created_at = ts(OUT_BEFORE);
         f.reviewer = Ok(vec![m, stale]);
         let o = run(&f);
         assert_eq!(o.mrs.len(), 1);

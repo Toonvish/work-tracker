@@ -5,8 +5,8 @@ use reqwest::header::HeaderValue;
 use serde::de::DeserializeOwned;
 
 use super::{
-    ACTIVITY_PAGE_CAP, ACTIVITY_PAGE_SIZE, ActivityQuery, ISSUE_FIELDS, ISSUE_PAGE_CAP,
-    ISSUE_PAGE_SIZE, YouTrackApi, YtActivity, YtIssue, YtProject,
+    ACTIVITY_FIELDS, ACTIVITY_PAGE_CAP, ACTIVITY_PAGE_SIZE, ActivityQuery, ISSUE_FIELDS,
+    ISSUE_PAGE_CAP, ISSUE_PAGE_SIZE, YouTrackApi, YtActivity, YtIssue, YtProject,
 };
 use crate::config::YouTrackConfig;
 use crate::error::ApiError;
@@ -51,24 +51,29 @@ pub fn issue_url(base: &str, id: &str) -> Url {
 }
 
 /// `GET /api/activities?categories=..&author=me&start=..&end=..&reverse=true[&issueQuery=..]`
-pub fn activities_url(base: &str, q: &ActivityQuery, top: usize, skip: usize) -> Url {
+pub fn activities_url(
+    base: &str,
+    q: &ActivityQuery,
+    author_me: bool,
+    top: usize,
+    skip: usize,
+) -> Url {
     let mut url = api_url(base, "/activities");
     {
         let mut p = url.query_pairs_mut();
-        p.append_pair("categories", &q.categories.join(","))
-            .append_pair("author", "me")
-            .append_pair("start", &q.start_ms.to_string())
+        p.append_pair("categories", &q.categories.join(","));
+        if author_me {
+            p.append_pair("author", "me");
+        }
+        p.append_pair("start", &q.start_ms.to_string())
             .append_pair("end", &q.end_ms.to_string())
             .append_pair("reverse", "true");
         if let Some(iq) = &q.issue_query {
             p.append_pair("issueQuery", iq);
         }
-        p.append_pair(
-            "fields",
-            "timestamp,category(id),target(idReadable,issue(idReadable))",
-        )
-        .append_pair("$top", &top.to_string())
-        .append_pair("$skip", &skip.to_string());
+        p.append_pair("fields", ACTIVITY_FIELDS)
+            .append_pair("$top", &top.to_string())
+            .append_pair("$skip", &skip.to_string());
     }
     url
 }
@@ -136,6 +141,22 @@ impl YouTrackClient {
     }
 }
 
+impl YouTrackClient {
+    fn activities(
+        &self,
+        q: &ActivityQuery,
+        author_me: bool,
+    ) -> Result<Listing<YtActivity>, ApiError> {
+        paginate(ACTIVITY_PAGE_CAP, |i| {
+            let skip = i as usize * ACTIVITY_PAGE_SIZE;
+            self.get_page(
+                activities_url(&self.base, q, author_me, ACTIVITY_PAGE_SIZE, skip),
+                ACTIVITY_PAGE_SIZE,
+            )
+        })
+    }
+}
+
 impl YouTrackApi for YouTrackClient {
     fn project_short_names(&self) -> Result<Vec<String>, ApiError> {
         let projects = self.get::<Vec<YtProject>>(admin_projects_url(&self.base), Vec::len)?;
@@ -161,13 +182,11 @@ impl YouTrackApi for YouTrackClient {
     }
 
     fn my_activities(&self, q: &ActivityQuery) -> Result<Listing<YtActivity>, ApiError> {
-        paginate(ACTIVITY_PAGE_CAP, |i| {
-            let skip = i as usize * ACTIVITY_PAGE_SIZE;
-            self.get_page(
-                activities_url(&self.base, q, ACTIVITY_PAGE_SIZE, skip),
-                ACTIVITY_PAGE_SIZE,
-            )
-        })
+        self.activities(q, true)
+    }
+
+    fn issue_activities(&self, q: &ActivityQuery) -> Result<Listing<YtActivity>, ApiError> {
+        self.activities(q, false)
     }
 }
 
@@ -240,7 +259,7 @@ mod tests {
 
     #[test]
     fn activities_pairs() {
-        let u = activities_url(BASE, &aq(None), 200, 400);
+        let u = activities_url(BASE, &aq(None), true, 200, 400);
         assert_eq!(u.path(), "/api/activities");
         let m = map(&u);
         assert_eq!(m["categories"], FULL_CATEGORIES.join(","));
@@ -251,8 +270,10 @@ mod tests {
         assert_eq!(m["reverse"], "true");
         assert_eq!(
             m["fields"],
-            "timestamp,category(id),target(idReadable,issue(idReadable))"
+            "timestamp,category(id),field(name),added(name),target(idReadable,issue(idReadable))"
         );
+        let others = map(&activities_url(BASE, &aq(None), false, 200, 0));
+        assert!(!others.contains_key("author"));
         assert_eq!(m["$top"], "200");
         assert_eq!(m["$skip"], "400");
         assert!(!m.contains_key("issueQuery"));
@@ -260,11 +281,11 @@ mod tests {
 
     #[test]
     fn activities_issue_query_only_when_set() {
-        let u = activities_url(BASE, &aq(Some("project: SP")), 200, 0);
+        let u = activities_url(BASE, &aq(Some("project: SP")), true, 200, 0);
         assert_eq!(map(&u)["issueQuery"], "project: SP");
         let mut q = aq(None);
         q.categories = CORE_CATEGORIES.to_vec();
-        let m = map(&activities_url(BASE, &q, 200, 0));
+        let m = map(&activities_url(BASE, &q, true, 200, 0));
         assert_eq!(m["categories"].split(',').count(), 5);
         assert!(!m.contains_key("issueQuery"));
     }

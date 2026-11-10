@@ -8,6 +8,7 @@ use crate::error::CliError;
 use crate::report::{Counts, Report};
 use crate::window::{Window, format_window_line};
 
+pub mod detail;
 pub mod interactive;
 pub mod json;
 pub mod plain;

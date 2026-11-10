@@ -4,35 +4,22 @@ use std::collections::BTreeSet;
 use std::fmt::Display;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
-use console::{Alignment, StyledObject, measure_text_width, pad_str, style, truncate_str};
+use console::{Alignment, StyledObject, measure_text_width, pad_str, style};
 
 use crate::model::{Issue, MergeRequest, MrState, Role};
 use crate::report::{Entry, Report};
 use crate::text::sanitize_line;
 
-const ISSUE_W: usize = 9;
-const MR_W: usize = 16;
-const ISSUE_STATE_W: usize = 12;
-const MR_STATE_W: usize = 8;
-const UPDATED_W: usize = 11;
+pub(super) const ISSUE_W: usize = 9;
+pub(super) const MR_W: usize = 16;
+pub(super) const ISSUE_STATE_W: usize = 12;
+pub(super) const MR_STATE_W: usize = 8;
+pub(super) const UPDATED_W: usize = 11;
 const ROLES_W: usize = 18;
-const MIN_TITLE_W: usize = 20;
-/// Fixed columns (9 + 16 + 12 + 8 + 11 + 18) plus 6 separators of 2 columns.
-const FIXED_W: usize = ISSUE_W + MR_W + ISSUE_STATE_W + MR_STATE_W + UPDATED_W + ROLES_W + 6 * 2;
 const SEP: &str = "  ";
-const ELLIPSIS: &str = "\u{2026}";
+pub(super) const ELLIPSIS: &str = "\u{2026}";
 /// Shown in the issue or MR columns when the task has none.
-const NONE: &str = "-";
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Target {
-    Url(String),
-    ChooseMr {
-        issue_url: String,
-        /// (label `!456 group/proj  <title>`, url)
-        mrs: Vec<(String, String)>,
-    },
-}
+pub(super) const NONE: &str = "-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateStyle {
@@ -67,18 +54,13 @@ pub struct Row {
     pub roles: String,
     /// Plain-layout links: the issue first, then every MR.
     pub urls: Vec<String>,
-    pub target: Target,
 }
 
+/// Column widths of the plain table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
-    Interactive {
-        width: usize,
-    },
-    Plain {
-        title_width: usize,
-        roles_width: usize,
-    },
+pub struct Layout {
+    pub title_width: usize,
+    pub roles_width: usize,
 }
 
 fn role_name(r: Role) -> &'static str {
@@ -96,7 +78,7 @@ fn role_name(r: Role) -> &'static str {
 }
 
 /// `ref` is dropped when other roles explain why the task is listed.
-fn roles_text(mut roles: BTreeSet<Role>) -> String {
+pub(super) fn roles_text(mut roles: BTreeSet<Role>) -> String {
     if roles.len() > 1 {
         roles.remove(&Role::Referenced);
     }
@@ -126,14 +108,25 @@ fn mr_style(s: MrState) -> StateStyle {
     }
 }
 
-fn mr_state(mr: &MergeRequest) -> State {
+pub(super) fn mr_state(mr: &MergeRequest) -> State {
     State {
         text: mr_state_text(mr.state).to_string(),
         style: mr_style(mr.state),
     }
 }
 
-fn format_updated<Tz: TimeZone>(t: DateTime<Utc>, tz: &Tz, now_year: i32) -> String
+pub(super) fn issue_state(issue: &Issue) -> State {
+    State {
+        text: sanitize_line(&issue.state),
+        style: if issue.resolved {
+            StateStyle::IssueResolved
+        } else {
+            StateStyle::IssueOpen
+        },
+    }
+}
+
+pub(super) fn format_updated<Tz: TimeZone>(t: DateTime<Utc>, tz: &Tz, now_year: i32) -> String
 where
     Tz::Offset: Display,
 {
@@ -173,30 +166,10 @@ fn mr_ref(mr: &MergeRequest, more: usize) -> String {
     format!("{ELLIPSIS}{}{suffix}", tail.into_iter().collect::<String>())
 }
 
-fn mr_label(mr: &MergeRequest) -> String {
-    format!(
-        "!{} {}  {}",
-        mr.iid,
-        sanitize_line(&mr.project_path),
-        sanitize_line(&mr.title)
-    )
-}
-
 fn issue_row<Tz: TimeZone>(issue: &Issue, mrs: &[MergeRequest], tz: &Tz, now_year: i32) -> Row
 where
     Tz::Offset: Display,
 {
-    let target = match mrs {
-        [] => Target::Url(issue.web_url.clone()),
-        [one] => Target::Url(one.web_url.clone()),
-        many => Target::ChooseMr {
-            issue_url: issue.web_url.clone(),
-            mrs: many
-                .iter()
-                .map(|m| (mr_label(m), m.web_url.clone()))
-                .collect(),
-        },
-    };
     let updated = mrs
         .iter()
         .map(|m| m.updated_at)
@@ -213,14 +186,7 @@ where
             .map(|m| mr_ref(m, mrs.len() - 1))
             .unwrap_or_default(),
         title: sanitize_line(&issue.summary),
-        issue_state: Some(State {
-            text: sanitize_line(&issue.state),
-            style: if issue.resolved {
-                StateStyle::IssueResolved
-            } else {
-                StateStyle::IssueOpen
-            },
-        }),
+        issue_state: Some(issue_state(issue)),
         mr_state: mrs.first().map(mr_state),
         updated: format_updated(updated, tz, now_year),
         roles: roles_text(roles),
@@ -228,7 +194,6 @@ where
             .chain(mrs.iter().map(|m| &m.web_url))
             .map(|u| sanitize_line(u))
             .collect(),
-        target,
     }
 }
 
@@ -250,7 +215,6 @@ where
         updated: format_updated(mr.updated_at, tz, now_year),
         roles: roles_text(mr.roles.clone()),
         urls: vec![sanitize_line(&mr.web_url)],
-        target: Target::Url(mr.web_url.clone()),
     }
 }
 
@@ -272,7 +236,7 @@ where
 /// Plain layout for `rows`: titles `min(80, widest)`, at least 5; roles as wide as the
 /// widest, at least 18, so the links line up.
 pub fn plain_layout(rows: &[Row]) -> Layout {
-    Layout::Plain {
+    Layout {
         title_width: plain_title_width(rows),
         roles_width: rows
             .iter()
@@ -334,72 +298,42 @@ fn ref_cell(
     }
 }
 
-/// `(title width, total width limit)` for a layout.
-fn widths(layout: Layout) -> (usize, Option<usize>) {
-    match layout {
-        Layout::Interactive { width } => {
-            (width.saturating_sub(FIXED_W).max(MIN_TITLE_W), Some(width))
-        }
-        Layout::Plain { title_width, .. } => (title_width, None),
-    }
-}
-
-/// Roles are the last interactive column (truncated, unpadded); plain pads them and adds the links.
-fn tail_cells(roles: &str, links: String, layout: Layout, color: bool) -> Vec<String> {
-    match layout {
-        Layout::Interactive { .. } => vec![paint(
-            truncate_str(roles, ROLES_W, ELLIPSIS).into_owned(),
-            color,
-            StyledObject::dim,
-        )],
-        Layout::Plain { roles_width, .. } => vec![
-            paint(
-                pad_str(roles, roles_width, Alignment::Left, None).into_owned(),
-                color,
-                StyledObject::dim,
-            ),
-            links,
-        ],
-    }
-}
-
-fn join(parts: Vec<String>, limit: Option<usize>) -> String {
-    let line = parts.join(SEP);
-    let line = match limit {
-        Some(w) => truncate_str(&line, w, ELLIPSIS).into_owned(),
-        None => line,
-    };
-    line.trim_end().to_string()
+fn join(parts: Vec<String>) -> String {
+    parts.join(SEP).trim_end().to_string()
 }
 
 /// Formats one row. Colour is applied only when `color` is true.
 pub fn format_row(row: &Row, layout: Layout, color: bool) -> String {
-    let (title_w, limit) = widths(layout);
-    let mut parts = vec![
+    let parts = vec![
         ref_cell(&row.issue, ISSUE_W, color, |s| s.cyan().bold()),
         ref_cell(&row.mr, MR_W, color, |s| s.blue().bright()),
-        cell(&row.title, title_w),
+        cell(&row.title, layout.title_width),
         state_cell(row.issue_state.as_ref(), ISSUE_STATE_W, color),
         state_cell(row.mr_state.as_ref(), MR_STATE_W, color),
         paint(cell(&row.updated, UPDATED_W), color, StyledObject::dim),
+        paint(
+            pad_str(&row.roles, layout.roles_width, Alignment::Left, None).into_owned(),
+            color,
+            StyledObject::dim,
+        ),
+        row.urls.join(SEP),
     ];
-    parts.extend(tail_cells(&row.roles, row.urls.join(SEP), layout, color));
-    join(parts, limit)
+    join(parts)
 }
 
 /// The column header line, aligned with `format_row` for the same layout.
 pub fn format_header(layout: Layout, color: bool) -> String {
-    let (title_w, limit) = widths(layout);
-    let mut parts = vec![
+    let parts = vec![
         cell("ISSUE", ISSUE_W),
         cell("MR", MR_W),
-        cell("TITLE", title_w),
+        cell("TITLE", layout.title_width),
         cell("ISSUE STATE", ISSUE_STATE_W),
         cell("MR STATE", MR_STATE_W),
         cell("UPDATED", UPDATED_W),
+        pad_str("ROLES", layout.roles_width, Alignment::Left, None).into_owned(),
+        "URL".to_string(),
     ];
-    parts.extend(tail_cells("ROLES", "URL".into(), layout, false));
-    paint(join(parts, limit), color, StyledObject::bold)
+    paint(join(parts), color, StyledObject::bold)
 }
 
 #[cfg(test)]
@@ -447,37 +381,6 @@ mod tests {
                 ("SP-3", "a!30 +1"),
                 ("", "orphan!9")
             ]
-        );
-    }
-
-    #[test]
-    fn target_rules() {
-        let r = rows();
-        // 0 MRs: the issue.
-        assert_eq!(
-            r[0].target,
-            Target::Url("https://yt.example.com/issue/SP-1".into())
-        );
-        // 1 MR: the MR.
-        assert_eq!(
-            r[1].target,
-            Target::Url("https://gl.example.com/g/p/-/merge_requests/20".into())
-        );
-        // 2 MRs: a choice with both MRs.
-        match &r[2].target {
-            Target::ChooseMr { issue_url, mrs } => {
-                assert_eq!(issue_url, "https://yt.example.com/issue/SP-3");
-                assert_eq!(mrs.len(), 2);
-                assert_eq!(mrs[0].0, "!30 g/a  first");
-                assert_eq!(mrs[0].1, "https://gl.example.com/g/a/-/merge_requests/30");
-                assert_eq!(mrs[1].0, "!31 g/b  second");
-            }
-            other => panic!("expected ChooseMr, got {other:?}"),
-        }
-        // Orphans open their MR.
-        assert_eq!(
-            r[3].target,
-            Target::Url("https://gl.example.com/g/orphan/-/merge_requests/9".into())
         );
     }
 
@@ -659,34 +562,13 @@ mod tests {
             {
                 assert!(!text.chars().any(char::is_control), "{text:?}");
             }
-            let label = format_row(r, Layout::Interactive { width: 120 }, false);
-            assert!(!label.chars().any(char::is_control), "{label:?}");
         }
         assert_eq!(rows[0].title, "sum  mary");
         assert_eq!(rows[1].title, "line1 line2  [31mred \u{2192} SP-1");
-        if let Target::ChooseMr { .. } = rows[0].target {
-            panic!("single MR must not be a choice");
-        }
-    }
-
-    #[test]
-    fn choose_mr_labels_are_sanitized() {
-        let u = t(2026, 9, 30, 9, 0);
-        let rep = report(vec![Entry::Issue {
-            issue: issue("SP-1", "x", u),
-            mrs: vec![mr(1, "g/a", "a\nb", u), mr(2, "g/b", "c\x1bd", u)],
-        }]);
-        let r = build_rows(&rep, &Berlin, 2026);
-        let Target::ChooseMr { mrs, .. } = &r[0].target else {
-            panic!("expected ChooseMr");
-        };
-        for (label, _) in mrs {
-            assert!(!label.chars().any(char::is_control), "{label:?}");
-        }
     }
 
     fn plain(title_width: usize) -> Layout {
-        Layout::Plain {
+        Layout {
             title_width,
             roles_width: ROLES_W,
         }
@@ -711,37 +593,24 @@ mod tests {
                 "https://yt.example.com/issue/SP-123".into(),
                 "https://gl.example.com/g/proj/-/merge_requests/45".into(),
             ],
-            target: Target::Url("https://gl.example.com/g/proj/-/merge_requests/45".into()),
         }
-    }
-
-    #[test]
-    fn interactive_row_matches_literal() {
-        let r = row("Fix login", "assignee,commenter");
-        assert_eq!(
-            format_row(&r, Layout::Interactive { width: 120 }, false),
-            "SP-123     proj!45           Fix login                           In Progress   opened    09-30 11:00  assignee,commenter"
-        );
     }
 
     #[test]
     fn header_aligns_with_rows() {
-        for layout in [Layout::Interactive { width: 120 }, plain(20)] {
-            let header = format_header(layout, false);
-            let line = format_row(&row("Fix login", "author"), layout, false);
-            for (label, value) in [
-                ("MR", "proj!45"),
-                ("TITLE", "Fix login"),
-                ("ISSUE STATE", "In Progress"),
-                ("MR STATE", "opened"),
-                ("UPDATED", "09-30"),
-                ("ROLES", "author"),
-            ] {
-                assert_eq!(header.find(label), line.find(value), "{layout:?} {label}");
-            }
-        }
         let plain = plain(20);
+        let header = format_header(plain, false);
         let line = format_row(&row("Fix login", "author"), plain, false);
+        for (label, value) in [
+            ("MR", "proj!45"),
+            ("TITLE", "Fix login"),
+            ("ISSUE STATE", "In Progress"),
+            ("MR STATE", "opened"),
+            ("UPDATED", "09-30"),
+            ("ROLES", "author"),
+        ] {
+            assert_eq!(header.find(label), line.find(value), "{label}");
+        }
         assert_eq!(
             format_header(plain, false).find("URL"),
             line.find("https://")
@@ -753,62 +622,9 @@ mod tests {
         let mut r = row("t", "author");
         r.issue = String::new();
         r.issue_state = None;
-        let s = format_row(&r, Layout::Interactive { width: 120 }, false);
+        let s = format_row(&r, plain(5), false);
         assert!(s.starts_with("-          proj!45"), "{s}");
-        assert!(
-            s.contains("t                                   -             opened"),
-            "{s}"
-        );
-    }
-
-    #[test]
-    fn interactive_row_has_no_trailing_spaces() {
-        let r = row("Fix login", "");
-        let s = format_row(&r, Layout::Interactive { width: 120 }, false);
-        assert!(!s.ends_with(' '), "{s:?}");
-        assert!(s.ends_with("09-30 11:00"), "{s:?}");
-    }
-
-    #[test]
-    fn interactive_roles_are_truncated_to_18() {
-        let r = row("t", "author,reviewer,approver,commenter");
-        let s = format_row(&r, Layout::Interactive { width: 200 }, false);
-        assert!(s.ends_with("author,reviewer,a\u{2026}"), "{s}");
-    }
-
-    #[test]
-    fn interactive_labels_fit_width() {
-        let long = "very long title ".repeat(30);
-        let wide = "\u{65E5}\u{672C}\u{8A9E}".repeat(60);
-        for title in [long.as_str(), wide.as_str(), "short"] {
-            let r = row(title, "author,reviewer,approver,commenter,merger");
-            for width in [60usize, 101, 160] {
-                for color in [false, true] {
-                    let label = format_row(&r, Layout::Interactive { width }, color);
-                    assert!(
-                        measure_text_width(&label) <= width,
-                        "width {width}: {} > {width}: {label}",
-                        measure_text_width(&label)
-                    );
-                    assert_eq!(label.contains('\x1b'), color);
-                    assert!(!label.ends_with(' '), "{label:?}");
-                }
-                let header = format_header(Layout::Interactive { width }, false);
-                assert!(measure_text_width(&header) <= width);
-            }
-        }
-    }
-
-    #[test]
-    fn interactive_title_width_is_at_least_20() {
-        let r = row(&"x".repeat(100), "a");
-        let label = format_row(&r, Layout::Interactive { width: 90 }, false);
-        // 90 - 86 = 4, raised to 20: the title is cut to 20 columns, and the row itself to 90.
-        assert!(
-            label.contains(&format!("{}\u{2026}", "x".repeat(19))),
-            "{label}"
-        );
-        assert!(measure_text_width(&label) <= 90);
+        assert!(s.contains("t      -             opened"), "{s}");
     }
 
     #[test]
@@ -828,19 +644,13 @@ mod tests {
     #[test]
     fn plain_roles_column_fits_the_widest_roles() {
         let rows = [row("t", "author"), row("t", &"r".repeat(30))];
-        let Layout::Plain { roles_width, .. } = plain_layout(&rows) else {
-            unreachable!()
-        };
-        assert_eq!(roles_width, 30);
+        assert_eq!(plain_layout(&rows).roles_width, 30);
         let lines: Vec<String> = rows
             .iter()
             .map(|r| format_row(r, plain_layout(&rows), false))
             .collect();
         assert_eq!(lines[0].find("https://"), lines[1].find("https://"));
-        let Layout::Plain { roles_width, .. } = plain_layout(&rows[..1]) else {
-            unreachable!()
-        };
-        assert_eq!(roles_width, ROLES_W);
+        assert_eq!(plain_layout(&rows[..1]).roles_width, ROLES_W);
     }
 
     #[test]
