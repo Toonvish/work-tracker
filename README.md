@@ -144,6 +144,15 @@ source branch. Enter opens the MR (the most recently updated one), `i` opens
 the issue, and `1`-`9` open the n-th MR when a row has several. Colours are
 used on a terminal that allows them (`NO_COLOR` turns them off).
 
+Under each MR the pane shows its **whole description as rendered markdown**
+(headings, lists, emphasis, code, tables, links). Screenshots and other
+images uploaded to the description are downloaded with your GitLab token and
+shown in place, in terminals with an image protocol (kitty graphics, as in
+Ghostty, kitty and WezTerm; sixel; iTerm2) and as coarse half-blocks
+elsewhere. They load in the background once a row stays selected. PageUp /
+PageDown scroll the pane and Tab gives it the whole list area. When any MR
+has a description, the list uses all free terminal rows.
+
 `--plain` prints the table columns plus your roles and every URL of the row
 (issue first, then the MRs).
 
@@ -191,7 +200,9 @@ The resolved window is always printed at the top of the report.
 | Key | Action |
 |---|---|
 | Up / Down (or `k` / `j`) | Move the selection |
-| PageUp / PageDown | Move ten rows |
+| PageUp / PageDown (or Space) | Scroll the detail pane by a page |
+| Shift+Up / Shift+Down (or `K` / `J`) | Scroll the detail pane by three lines |
+| Tab (or `z`) | Zoom: the detail pane covers the table, and back |
 | Home / End (or `g` / `G`) | First / last row |
 | Enter | Open the MR in the browser (the most recently updated one; the issue when the row has no MR) |
 | `i` | Open the issue in the browser |
@@ -295,6 +306,11 @@ Matching rules:
   a warning.
 - **An MR referencing two issues appears twice**, once under each issue
   group. It is counted once in the totals.
+- **Images.** Only files uploaded to the MR description
+  (`/uploads/<secret>/<name>`) are shown; an image hosted elsewhere appears as
+  its address. Images are sized for the pane width when they load and are not
+  resized afterwards. Keys typed while the list starts can be lost, because
+  the terminal is asked which image protocol it supports.
 - **Closed-only detection needs the full activity categories.** If the
   YouTrack server rejects some activity categories (a warning says so), issues
   that were only moved to a resolved state stay listed.

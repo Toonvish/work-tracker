@@ -227,7 +227,16 @@ fn run_report(cli: &Cli) -> Result<u8, CliError> {
     if outcome.failed_sources.len() == outcome.enabled_sources {
         return Err(CliError::runtime(anyhow::anyhow!(warnings.join("\n"))));
     }
-    render(mode, &outcome.report, &window, &warnings, req.now)?;
+    let fetch = gl_client
+        .clone()
+        .map(|client| -> crate::ui::interactive::Fetch {
+            std::sync::Arc::new(move |project, secret, filename| {
+                client
+                    .upload(project, secret, filename)
+                    .map_err(|e| e.to_string())
+            })
+        });
+    render(mode, &outcome.report, &window, &warnings, req.now, fetch)?;
     Ok(if outcome.failed_sources.is_empty() {
         0
     } else {

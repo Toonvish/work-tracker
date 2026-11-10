@@ -70,7 +70,8 @@ work-tracker/
 │       ├── mod.rs             # OutputMode selection, header rendering
 │       ├── rows.rs            # Row model + formatting (pure, unit-tested)
 │       ├── detail.rs          # full text of one task for the detail pane; what each key opens
-│       ├── interactive.rs     # ratatui table + detail pane + open::that_detached
+│       ├── markdown.rs        # MR description: split into text and images, text to styled lines
+│       ├── interactive.rs     # ratatui table + scrollable detail pane, image loading, open::that_detached
 │       ├── plain.rs           # static table
 │       └── json.rs            # serde JSON output
 └── tests/
@@ -260,7 +261,10 @@ anyhow     = "1.0.104"
 chrono     = { version = "0.4.45", features = ["serde"] }
 clap       = { version = "4.6.7", features = ["derive"] }
 console    = "0.16.6"          # widths, truncation, colors (honours NO_COLOR)
-ratatui    = { version = "0.30.2", default-features = false, features = ["crossterm"] }   # interactive list
+ratatui    = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }   # interactive list; Paragraph::line_count
+tui-markdown  = { version = "0.3.13", default-features = false }                           # MR description to ratatui Text (no syntect)
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] } # kitty / sixel / iTerm2 / half-blocks
+image         = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 open       = "5.4.4"           # open::that_detached(url)
 regex      = "1.13.1"
 reqwest    = { version = "0.13.5", features = ["blocking", "json", "query"] }
@@ -1350,12 +1354,50 @@ Viewport height = column header + rows + detail pane + help line, limited to
 the terminal rows left below the header lines (at least 8).
 
 Keys (`action` maps a key to an `Action`, `handle` applies it; both tested):
-Up/`k`, Down/`j`, PageUp/PageDown (10 rows), Home/`g`, End/`G`; Enter,
-`i`, `1`-`9` open; Esc, `q`, Ctrl-C quit. `detail::url_for(items, Open)`:
+Up/`k`, Down/`j`, Home/`g`, End/`G` move; PageUp/PageDown/Space, Shift+Up/Down,
+`K`/`J` scroll the pane; Tab/`z` zooms; Enter, `i`, `1`-`9` open; Esc, `q`,
+Ctrl-C quit. `detail::url_for(items, Open)`:
 - `Default` (Enter): the first (most recently updated) MR, or the issue
   when the row has no MR.
 - `Issue` (`i`): the issue; an orphan MR has none.
 - `Mr(n)`: the n-th MR.
+
+**MR descriptions** (`ui/markdown.rs`, pure). `split(description)` cuts the
+GitLab markdown at every image (`![alt](target "title"){attrs}` or
+`<img src="target">`) into `Part::Text` and `Part::Image`. A target ending in
+`/uploads/<32 hex>/<filename>` is an `ImageRef::Upload`; anything else is
+`External` and is shown as its address. `render(markdown, width)` turns text
+into styled lines with tui-markdown (tables laid out for the width). Control
+characters are replaced before either step, so a description cannot send
+escape sequences to the terminal.
+
+The detail pane is a document of pieces: text (item head lines and rendered
+markdown, with its wrapped height from `Paragraph::line_count`) and images.
+It is rebuilt when the selected row or the pane width changes. `draw_doc`
+renders the pieces that intersect the scroll window; a partly visible image
+is drawn with ratatui-image's `SlicedImage`. An image that is not loaded yet,
+or failed, is one line of text.
+
+- When any MR has a description the viewport takes all free terminal rows;
+  the table gets its rows but at most two fifths, the pane the rest. Without
+  descriptions the compact layout above is kept.
+- PageUp/PageDown/Space scroll by a page, Shift+Up/Down or `K`/`J` by three
+  lines; the offset is clamped at draw time and reset when the selection
+  moves. The border shows `lines a-b of n` when the content overflows.
+- Tab or `z` toggles zoom: the table is hidden and the pane takes its rows.
+
+**Images.** `GitLabClient::upload(project, secret, filename)` is
+`GET /projects/:id/uploads/:secret/:filename` with the token; `app.rs` hands
+the UI a `Fetch` closure over a clone of the client. After raw mode is on,
+`Picker::from_query_stdio()` asks the terminal for its protocol and cell
+size (half-blocks when that fails); this happens only when some description
+has an uploaded image. The event loop polls keys every 100 ms. When no key
+arrived in that time, the images the selected row still lacks are marked
+`Loading` and each gets a thread: download, decode, fit into
+`pane width × 30 rows`, encode for the protocol, send over a channel. The
+loop stores arrivals (`Ready` / `Failed`) and redraws. Results are cached for
+the session by `(project, secret, filename)`. Nothing is written to stderr
+while the viewport is up.
 
 `open::that_detached(url)`; its result goes to the help line, never to
 stderr, which would disturb the viewport. On quit the viewport is cleared and
@@ -1509,7 +1551,8 @@ and `cargo fmt --check`.
 | DTO deserialization | `tests/fixtures/*.json` (hand-written from the API docs), loaded with `include_str!`: GitLab MR list, events (MR approved, note on MR, push, issue note), user. YouTrack issues (with `$type` noise and the State field as an object), activities (comment and custom-field targets). Each deserializes and converts correctly |
 | `ui::rows` | one row per entry with issue/MR refs. MR-column left truncation keeps `!iid +N`. The header aligns with the rows. Stripping colour gives the uncoloured row. A title containing `\n` is sanitized. A plain row ends with all its URLs and no trailing spaces. Updated-date format for the current and another year |
 | `ui::detail` | issue first, then every MR, with untruncated titles and meta; what Enter, `i` and `1`-`9` open for rows with 0, 1 and 2 MRs and for an orphan |
-| `ui::interactive` | `draw` on a ratatui `TestBackend`: table rows, detail pane of the selected row, wrapping of long titles, columns dropped on narrow terminals; key handling (move, clamp, quit, status message) |
+| `ui::interactive` | `draw` on a ratatui `TestBackend`: table rows, detail pane of the selected row, wrapping of long titles, columns dropped on narrow terminals; key handling (move, clamp, quit, status message); a description rendered as markdown, paging and line scrolling with clamping, zoom, a loaded half-block image taking its rows, a failed image |
+| `ui::markdown` | text and images in order; `{attrs}`, titles, `<img>`, absolute upload URLs, external images; links are not images; control characters removed; headings, lists, emphasis and tables rendered |
 | `ui` (mod) | `format_counts` singular/plural; mode selection as a pure fn `select_mode(json, plain, stdout_tty, stderr_tty, stdin_tty) -> OutputMode` |
 | `ui::json` | the serialized output has the documented keys; roles lowercase; IssueId serialized as `"SP-123"`; origin `meeting` / `previous` / `explicit` |
 | `app` (unit tests in `src/app.rs`, using the fakes) | `build_report` with a fake GitLab and a fake YouTrack yields a linked group, an orphan, and a referenced issue fetched by ID. Alias: MR title `OLD-12 fix`, with the YouTrack fake resolving OLD-12 to NEW-5 → the MR sits under the NEW-5 group and there is no OLD-12 row. GitLab fake returns Unauthorized → YouTrack results present, `failed_sources == ["GitLab"]`. Both fail → `failed_sources.len() == enabled_sources == 2`. YouTrack `None` with `YtSettings.projects = ["SP"]` → an MR titled `SP-1 UTF-8 FIX-2` has `issue_ids == [SP-1]` |
@@ -1563,6 +1606,12 @@ Sections:
 ---
 
 ## 12. Revision log
+
+Revision 5 (MR descriptions):
+- 8.4: the detail pane shows each MR's whole description as rendered
+  markdown with its uploaded images, scrolls, and can be zoomed over the
+  table. PageUp/PageDown now scroll the pane instead of moving ten rows.
+- 5: `GitLabClient::upload` downloads description images.
 
 Revision 4 (readability, closed items):
 - 8.3 / 8.4: the interactive list is a ratatui table with a detail pane that

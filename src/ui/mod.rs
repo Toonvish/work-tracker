@@ -11,6 +11,7 @@ use crate::window::{Window, format_window_line};
 pub mod detail;
 pub mod interactive;
 pub mod json;
+pub mod markdown;
 pub mod plain;
 pub mod rows;
 
@@ -66,12 +67,14 @@ fn out_line(s: &str) {
 }
 
 /// Prints the report in the chosen mode. Warnings always go to stderr.
+/// `fetch` downloads the images of MR descriptions for the interactive list.
 pub fn render(
     mode: OutputMode,
     report: &Report,
     window: &Window,
     warnings: &[String],
     now: DateTime<Utc>,
+    fetch: Option<interactive::Fetch>,
 ) -> Result<(), CliError> {
     if mode == OutputMode::Json {
         print_warnings(warnings);
@@ -91,7 +94,7 @@ pub fn render(
             plain::print(report, now);
             Ok(())
         }
-        OutputMode::Interactive => interactive::run(report, now, warnings.len()),
+        OutputMode::Interactive => interactive::run(report, now, warnings.len(), fetch),
         OutputMode::Json => unreachable!("handled above"),
     }
 }

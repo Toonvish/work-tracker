@@ -83,6 +83,17 @@ pub fn project_mrs_url(base: &str, pid: u64, iids: &[u64]) -> Url {
     url
 }
 
+/// `GET /projects/<pid>/uploads/<secret>/<filename>`: a file attached to an MR description.
+pub fn upload_url(base: &str, pid: u64, secret: &str, filename: &str) -> Url {
+    let mut url = api_url(base, &format!("/projects/{pid}/uploads"));
+    url.path_segments_mut()
+        .expect("an http URL has path segments")
+        .push(secret)
+        .push(filename);
+    url
+}
+
+#[derive(Clone)]
 pub struct GitLabClient {
     base: String,
     token: HeaderValue,
@@ -144,6 +155,31 @@ impl GitLabClient {
         let n_items = result.as_ref().map_or(0, count);
         log_verbose(self.verbose, "GET", url.as_str(), status, n_items, bytes);
         result.map(|v| (v, next))
+    }
+
+    /// Downloads a file attached to an MR description (`/uploads/<secret>/<filename>`).
+    /// Never logs: it runs while the interactive list owns the terminal.
+    pub fn upload(&self, pid: u64, secret: &str, filename: &str) -> Result<Vec<u8>, ApiError> {
+        let url = upload_url(&self.base, pid, secret, filename);
+        let network = |source| ApiError::Network {
+            service: GITLAB,
+            url: url.to_string(),
+            source,
+        };
+        let resp = self
+            .http
+            .get(url.clone())
+            .header("PRIVATE-TOKEN", self.token.clone())
+            .send()
+            .map_err(network)?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ApiError::Other {
+                service: GITLAB,
+                message: format!("HTTP {status}"),
+            });
+        }
+        resp.bytes().map(|b| b.to_vec()).map_err(network)
     }
 
     fn get_page<T: DeserializeOwned>(&self, url: Url) -> Result<Page<T>, ApiError> {
@@ -213,6 +249,16 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-09-29T08:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn upload_url_encodes_the_filename() {
+        let u = upload_url(BASE, 502, "b2259262421e0480821f75988977bd75", "a b/c?.png");
+        assert_eq!(
+            u.path(),
+            "/api/v4/projects/502/uploads/b2259262421e0480821f75988977bd75/a%20b%2Fc%3F.png"
+        );
+        assert_eq!(u.query(), None);
     }
 
     #[test]

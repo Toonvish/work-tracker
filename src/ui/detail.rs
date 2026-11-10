@@ -28,6 +28,10 @@ pub struct Item {
     /// Roles, update time, branch and the like, shown after the state.
     pub meta: Vec<String>,
     pub url: String,
+    /// The MR description as GitLab markdown; empty for issues.
+    pub description: String,
+    /// GitLab project of an MR: where the images of its description are stored.
+    pub project_id: Option<u64>,
 }
 
 /// What a key press in the list asks to open.
@@ -60,6 +64,8 @@ where
         state: issue_state(issue),
         meta,
         url: issue.web_url.clone(),
+        description: String::new(),
+        project_id: None,
     }
 }
 
@@ -93,6 +99,8 @@ where
         state: mr_state(mr),
         meta,
         url: mr.web_url.clone(),
+        description: mr.description.clone(),
+        project_id: Some(mr.project_id),
     }
 }
 
@@ -155,6 +163,11 @@ mod tests {
         assert_eq!(it[1].reference, "g/a!30");
         assert_eq!(it[1].title, long);
         assert_eq!(it[1].meta, vec!["author", "updated 09-30 12:00", "feature"]);
+        assert_eq!((it[0].description.as_str(), it[0].project_id), ("", None));
+        assert_eq!(
+            (it[1].description.as_str(), it[1].project_id),
+            ("", Some(1))
+        );
         assert_eq!(it[2].reference, "g/sub/b!31");
         assert_eq!(
             it[2].meta,

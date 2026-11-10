@@ -119,6 +119,9 @@ Issues with no MR and MRs with no issue are still shown.
     (author / reviewer / commenter), last-updated time, project path and
     branch. (Changed 2026-11-10; roles used to be a list column, and titles
     were only shown truncated.)
+  - The pane also shows each MR's complete description as rendered markdown,
+    including the images uploaded to it, and is scrollable and zoomable.
+    (Added 2026-11-10.)
   - One row per task (issue with its MR(s), issue without MR, or MR
     without issue), all rows with the same columns; colour per column.
     (Changed 2026-10-02; was: issue line with its MR(s) beneath.)
@@ -144,5 +147,6 @@ Issues with no MR and MRs with no issue are still shown.
   done by the owner afterwards.
 - Keep dependencies reasonable: clap, serde/serde_json, toml, reqwest
   (blocking or tokio — designer picks one and sticks with it), chrono,
-  directories/xdg, anyhow/thiserror, regex, ratatui, open.
+  directories/xdg, anyhow/thiserror, regex, ratatui, open, plus tui-markdown,
+  ratatui-image and image for the MR descriptions.
 - README.md documenting install, config, usage.
